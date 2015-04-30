@@ -458,23 +458,26 @@ cc_library {
     },
     cflags: ["-Wno-unused-parameter"],
     local_include_dirs: ["src/include", "src/crypto"],
-    arch: {
-        x86: {
+    target: {
+        android_x86: {
             srcs: linux_x86_sources,
         },
-        x86_64: {
+        android_x86_64: {
             srcs: linux_x86_64_sources,
         },
-        arm: {
+        android_arm: {
             srcs: linux_arm_sources,
         },
-        arm64: {
+        android_arm64: {
             srcs: linux_aarch64_sources,
         },
-    },
-    // Windows and Macs both have problems with assembly files
-    // TODO: need to remove arch sources from above?
-    target: {
+        linux_x86: {
+            srcs: linux_x86_sources,
+        },
+        linux_x86_64: {
+            srcs: linux_x86_64_sources,
+        },
+        // Windows and Macs both have problems with assembly files
         darwin: {
             cflags: ["-DOPENSSL_NO_ASM"],
         },
