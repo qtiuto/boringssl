@@ -116,6 +116,7 @@ cc_library_static {
 cc_library_static {
     name: "libcrypto_static",
     defaults: ["libcrypto_sources", "libcrypto_defaults", "boringssl_defaults", "boringssl_flags"],
+    cflags: ["-DOPENSSL_NO_CXX"],
 
     target: {
         host: {
@@ -184,19 +185,6 @@ cc_library_static {
 }
 
 // Tests
-cc_test {
-    name: "boringssl_tests",
-    host_supported: true,
-    test_per_src: true,
-    defaults: ["boringssl_tests_sources", "boringssl_flags"],
-    whole_static_libs: ["boringssl_test_support"],
-
-    shared_libs: [
-        "libcrypto",
-        "libssl",
-    ],
-}
-
 cc_test {
   name: "boringssl_crypto_test",
   test_suites: ["device-tests"],
