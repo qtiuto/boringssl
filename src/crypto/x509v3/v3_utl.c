@@ -454,15 +454,13 @@ unsigned char *string_to_hex(const char *str, long *len)
             OPENSSL_free(hexbuf);
             return NULL;
         }
-        if (isupper(ch))
-            ch = tolower(ch);
-        if (isupper(cl))
-            cl = tolower(cl);
 
         if ((ch >= '0') && (ch <= '9'))
             ch -= '0';
         else if ((ch >= 'a') && (ch <= 'f'))
             ch -= 'a' - 10;
+        else if ((ch >= 'A') && (ch <= 'F'))
+            ch -= 'A' - 10;
         else
             goto badhex;
 
@@ -470,6 +468,8 @@ unsigned char *string_to_hex(const char *str, long *len)
             cl -= '0';
         else if ((cl >= 'a') && (cl <= 'f'))
             cl -= 'a' - 10;
+        else if ((cl >= 'A') && (cl <= 'F'))
+            cl -= 'A' - 10;
         else
             goto badhex;
 
@@ -824,32 +824,16 @@ static const unsigned char *valid_star(const unsigned char *p, size_t len,
                 return NULL;
             star = &p[i];
             state &= ~LABEL_START;
-        } else if ((state & LABEL_START) != 0) {
-            /*
-             * At the start of a label, skip any "xn--" and
-             * remain in the LABEL_START state, but set the
-             * IDNA label state
-             */
-            if ((state & LABEL_IDNA) == 0 && len - i >= 4
-                && OPENSSL_strncasecmp((char *)&p[i], "xn--", 4) == 0) {
-                i += 3;
-                state |= LABEL_IDNA;
-                continue;
-            }
-            /* Labels must start with a letter or digit */
-            state &= ~LABEL_START;
-            if (('a' <= p[i] && p[i] <= 'z')
-                || ('A' <= p[i] && p[i] <= 'Z')
-                || ('0' <= p[i] && p[i] <= '9'))
-                continue;
-            return NULL;
         } else if (('a' <= p[i] && p[i] <= 'z')
                    || ('A' <= p[i] && p[i] <= 'Z')
                    || ('0' <= p[i] && p[i] <= '9')) {
-            state &= LABEL_IDNA;
-            continue;
+            if ((state & LABEL_START) != 0
+                && len - i >= 4
+                && OPENSSL_strncasecmp((char *)&p[i], "xn--", 4) == 0)
+                state |= LABEL_IDNA;
+            state &= ~(LABEL_HYPHEN | LABEL_START);
         } else if (p[i] == '.') {
-            if (state & (LABEL_HYPHEN | LABEL_START))
+            if ((state & (LABEL_HYPHEN | LABEL_START)) != 0)
                 return NULL;
             state = LABEL_START;
             ++dots;

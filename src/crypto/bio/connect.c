@@ -98,12 +98,12 @@ typedef struct bio_connect_st {
   struct sockaddr_storage them;
   socklen_t them_length;
 
-  /* the file descriptor is kept in bio->num in order to match the socket
-   * BIO. */
+  // the file descriptor is kept in bio->num in order to match the socket
+  // BIO.
 
-  /* info_callback is called when the connection is initially made
-   * callback(BIO,state,ret);  The callback should return 'ret', state is for
-   * compatibility with the SSL info_callback. */
+  // info_callback is called when the connection is initially made
+  // callback(BIO,state,ret);  The callback should return 'ret', state is for
+  // compatibility with the SSL info_callback.
   int (*info_callback)(const BIO *bio, int state, int ret);
 } BIO_CONNECT;
 
@@ -113,9 +113,9 @@ static int closesocket(int sock) {
 }
 #endif
 
-/* split_host_and_port sets |*out_host| and |*out_port| to the host and port
- * parsed from |name|. It returns one on success or zero on error. Even when
- * successful, |*out_port| may be NULL on return if no port was specified. */
+// split_host_and_port sets |*out_host| and |*out_port| to the host and port
+// parsed from |name|. It returns one on success or zero on error. Even when
+// successful, |*out_port| may be NULL on return if no port was specified.
 static int split_host_and_port(char **out_host, char **out_port, const char *name) {
   const char *host, *port = NULL;
   size_t host_len = 0;
@@ -123,24 +123,24 @@ static int split_host_and_port(char **out_host, char **out_port, const char *nam
   *out_host = NULL;
   *out_port = NULL;
 
-  if (name[0] == '[') {  /* bracketed IPv6 address */
+  if (name[0] == '[') {  // bracketed IPv6 address
     const char *close = strchr(name, ']');
     if (close == NULL) {
       return 0;
     }
     host = name + 1;
     host_len = close - host;
-    if (close[1] == ':') {  /* [IP]:port */
+    if (close[1] == ':') {  // [IP]:port
       port = close + 2;
     } else if (close[1] != 0) {
       return 0;
     }
   } else {
     const char *colon = strchr(name, ':');
-    if (colon == NULL || strchr(colon + 1, ':') != NULL) {  /* IPv6 address */
+    if (colon == NULL || strchr(colon + 1, ':') != NULL) {  // IPv6 address
       host = name;
       host_len = strlen(name);
-    } else {  /* host:port */
+    } else {  // host:port
       host = name;
       host_len = colon - name;
       port = colon + 1;
@@ -175,9 +175,9 @@ static int conn_state(BIO *bio, BIO_CONNECT *c) {
   for (;;) {
     switch (c->state) {
       case BIO_CONN_S_BEFORE:
-        /* If there's a hostname and a port, assume that both are
-         * exactly what they say. If there is only a hostname, try
-         * (just once) to split it into a hostname and port. */
+        // If there's a hostname and a port, assume that both are
+        // exactly what they say. If there is only a hostname, try
+        // (just once) to split it into a hostname and port.
 
         if (c->param_hostname == NULL) {
           OPENSSL_PUT_ERROR(BIO, BIO_R_NO_HOSTNAME_SPECIFIED);
@@ -330,7 +330,7 @@ static void conn_close_socket(BIO *bio) {
     return;
   }
 
-  /* Only do a shutdown if things were established */
+  // Only do a shutdown if things were established
   if (c->state == BIO_CONN_S_OK) {
     shutdown(bio->num, 2);
   }
@@ -415,7 +415,7 @@ static long conn_ctrl(BIO *bio, int cmd, long num, void *ptr) {
       bio->flags = 0;
       break;
     case BIO_C_DO_STATE_MACHINE:
-      /* use this one to start the connection */
+      // use this one to start the connection
       if (data->state != BIO_CONN_S_OK) {
         ret = (long)conn_state(bio, data);
       } else {
@@ -468,14 +468,6 @@ static long conn_ctrl(BIO *bio, int cmd, long num, void *ptr) {
       break;
     case BIO_CTRL_FLUSH:
       break;
-    case BIO_CTRL_SET_CALLBACK: {
-#if 0 /* FIXME: Should this be used?  -- Richard Levitte */
-		OPENSSL_PUT_ERROR(BIO, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
-		ret = -1;
-#else
-      ret = 0;
-#endif
-    } break;
     case BIO_CTRL_GET_CALLBACK: {
       int (**fptr)(const BIO *bio, int state, int xret);
       fptr = (int (**)(const BIO *bio, int state, int xret))ptr;
@@ -485,7 +477,7 @@ static long conn_ctrl(BIO *bio, int cmd, long num, void *ptr) {
       ret = 0;
       break;
   }
-  return (ret);
+  return ret;
 }
 
 static long conn_callback_ctrl(BIO *bio, int cmd, bio_info_cb fp) {
@@ -495,18 +487,14 @@ static long conn_callback_ctrl(BIO *bio, int cmd, bio_info_cb fp) {
   data = (BIO_CONNECT *)bio->ptr;
 
   switch (cmd) {
-    case BIO_CTRL_SET_CALLBACK: {
+    case BIO_CTRL_SET_CALLBACK:
       data->info_callback = (int (*)(const struct bio_st *, int, int))fp;
-    } break;
+      break;
     default:
       ret = 0;
       break;
   }
   return ret;
-}
-
-static int conn_puts(BIO *bp, const char *str) {
-  return conn_write(bp, str, strlen(str));
 }
 
 BIO *BIO_new_connect(const char *hostname) {
@@ -524,8 +512,8 @@ BIO *BIO_new_connect(const char *hostname) {
 }
 
 static const BIO_METHOD methods_connectp = {
-    BIO_TYPE_CONNECT, "socket connect",         conn_write, conn_read,
-    conn_puts,        NULL /* connect_gets, */, conn_ctrl,  conn_new,
+    BIO_TYPE_CONNECT, "socket connect",   conn_write, conn_read,
+    NULL /* puts */,  NULL /* gets */,    conn_ctrl,  conn_new,
     conn_free,        conn_callback_ctrl,
 };
 

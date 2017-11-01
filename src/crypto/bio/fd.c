@@ -138,7 +138,7 @@ BIO *BIO_new_fd(int fd, int close_flag) {
 }
 
 static int fd_new(BIO *bio) {
-  /* num is used to store the file descriptor. */
+  // num is used to store the file descriptor.
   bio->num = -1;
   return 1;
 }
@@ -190,6 +190,7 @@ static long fd_ctrl(BIO *b, int cmd, long num, void *ptr) {
   switch (cmd) {
     case BIO_CTRL_RESET:
       num = 0;
+      OPENSSL_FALLTHROUGH;
     case BIO_C_FILE_SEEK:
       ret = 0;
       if (b->init) {
@@ -241,10 +242,6 @@ static long fd_ctrl(BIO *b, int cmd, long num, void *ptr) {
   return ret;
 }
 
-static int fd_puts(BIO *bp, const char *str) {
-  return fd_write(bp, str, strlen(str));
-}
-
 static int fd_gets(BIO *bp, char *buf, int size) {
   char *ptr = buf;
   char *end = buf + size - 1;
@@ -263,8 +260,9 @@ static int fd_gets(BIO *bp, char *buf, int size) {
 }
 
 static const BIO_METHOD methods_fdp = {
-    BIO_TYPE_FD, "file descriptor", fd_write, fd_read, fd_puts,
-    fd_gets,     fd_ctrl,           fd_new,   fd_free, NULL, };
+    BIO_TYPE_FD, "file descriptor", fd_write, fd_read, NULL /* puts */,
+    fd_gets,     fd_ctrl,           fd_new,   fd_free, NULL /* callback_ctrl */,
+};
 
 const BIO_METHOD *BIO_s_fd(void) { return &methods_fdp; }
 

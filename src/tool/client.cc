@@ -19,7 +19,9 @@
 #if !defined(OPENSSL_WINDOWS)
 #include <sys/select.h>
 #else
+OPENSSL_MSVC_PRAGMA(warning(push, 3))
 #include <winsock2.h>
+OPENSSL_MSVC_PRAGMA(warning(pop))
 #endif
 
 #include <openssl/err.h>
@@ -33,78 +35,115 @@
 
 static const struct argument kArguments[] = {
     {
-     "-connect", kRequiredArgument,
-     "The hostname and port of the server to connect to, e.g. foo.com:443",
+        "-connect", kRequiredArgument,
+        "The hostname and port of the server to connect to, e.g. foo.com:443",
     },
     {
-     "-cipher", kOptionalArgument,
-     "An OpenSSL-style cipher suite string that configures the offered ciphers",
+        "-cipher", kOptionalArgument,
+        "An OpenSSL-style cipher suite string that configures the offered "
+        "ciphers",
     },
     {
-     "-max-version", kOptionalArgument,
-     "The maximum acceptable protocol version",
+        "-curves", kOptionalArgument,
+        "An OpenSSL-style ECDH curves list that configures the offered curves",
     },
     {
-     "-min-version", kOptionalArgument,
-     "The minimum acceptable protocol version",
+        "-max-version", kOptionalArgument,
+        "The maximum acceptable protocol version",
     },
     {
-     "-server-name", kOptionalArgument,
-     "The server name to advertise",
+        "-min-version", kOptionalArgument,
+        "The minimum acceptable protocol version",
     },
     {
-     "-select-next-proto", kOptionalArgument,
-     "An NPN protocol to select if the server supports NPN",
+        "-server-name", kOptionalArgument, "The server name to advertise",
     },
     {
-     "-alpn-protos", kOptionalArgument,
-     "A comma-separated list of ALPN protocols to advertise",
+        "-select-next-proto", kOptionalArgument,
+        "An NPN protocol to select if the server supports NPN",
     },
     {
-     "-fallback-scsv", kBooleanArgument,
-     "Enable FALLBACK_SCSV",
+        "-alpn-protos", kOptionalArgument,
+        "A comma-separated list of ALPN protocols to advertise",
     },
     {
-     "-ocsp-stapling", kBooleanArgument,
-     "Advertise support for OCSP stabling",
+        "-fallback-scsv", kBooleanArgument, "Enable FALLBACK_SCSV",
     },
     {
-     "-signed-certificate-timestamps", kBooleanArgument,
-     "Advertise support for signed certificate timestamps",
+        "-ocsp-stapling", kBooleanArgument,
+        "Advertise support for OCSP stabling",
     },
     {
-     "-channel-id-key", kOptionalArgument,
-     "The key to use for signing a channel ID",
+        "-signed-certificate-timestamps", kBooleanArgument,
+        "Advertise support for signed certificate timestamps",
     },
     {
-     "-false-start", kBooleanArgument,
-     "Enable False Start",
-    },
-    { "-session-in", kOptionalArgument,
-      "A file containing a session to resume.",
-    },
-    { "-session-out", kOptionalArgument,
-      "A file to write the negotiated session to.",
+        "-channel-id-key", kOptionalArgument,
+        "The key to use for signing a channel ID",
     },
     {
-      "-key", kOptionalArgument,
-      "Private-key file to use (default is no client certificate)",
+        "-false-start", kBooleanArgument, "Enable False Start",
     },
     {
-      "-starttls", kOptionalArgument,
-      "A STARTTLS mini-protocol to run before the TLS handshake. Supported"
-      " values: 'smtp'",
+        "-session-in", kOptionalArgument,
+        "A file containing a session to resume.",
     },
     {
-     "-grease", kBooleanArgument,
-     "Enable GREASE",
+        "-session-out", kOptionalArgument,
+        "A file to write the negotiated session to.",
     },
     {
-      "-resume", kBooleanArgument,
-      "Establish a second connection resuming the original connection.",
+        "-key", kOptionalArgument,
+        "PEM-encoded file containing the private key.",
     },
     {
-     "", kOptionalArgument, "",
+        "-cert", kOptionalArgument,
+        "PEM-encoded file containing the leaf certificate and optional "
+        "certificate chain. This is taken from the -key argument if this "
+        "argument is not provided.",
+    },
+    {
+        "-starttls", kOptionalArgument,
+        "A STARTTLS mini-protocol to run before the TLS handshake. Supported"
+        " values: 'smtp'",
+    },
+    {
+        "-grease", kBooleanArgument, "Enable GREASE",
+    },
+    {
+        "-test-resumption", kBooleanArgument,
+        "Connect to the server twice. The first connection is closed once a "
+        "session is established. The second connection offers it.",
+    },
+    {
+        "-root-certs", kOptionalArgument,
+        "A filename containing one of more PEM root certificates. Implies that "
+        "verification is required.",
+    },
+    {
+        "-early-data", kOptionalArgument, "Allow early data",
+    },
+    {
+        "-tls13-variant", kOptionalArgument,
+        "Enable the specified experimental TLS 1.3 variant",
+    },
+    {
+        "-ed25519", kBooleanArgument, "Advertise Ed25519 support",
+    },
+    {
+        "-http-tunnel", kOptionalArgument,
+        "An HTTP proxy server to tunnel the TCP connection through",
+    },
+    {
+        "-renegotiate-freely", kBooleanArgument,
+        "Allow renegotiations from the peer.",
+    },
+    {
+        "-debug", kBooleanArgument,
+        "Print debug information about the handshake",
+    },
+    {
+        "", kOptionalArgument, "",
     },
 };
 
@@ -157,7 +196,15 @@ static bool WaitForSession(SSL *ssl, int sock) {
   }
 
   while (!resume_session) {
+#if defined(OPENSSL_WINDOWS)
+    // Windows sockets are really of type SOCKET, not int, but everything here
+    // casts them to ints. Clang gets unhappy about signed values as a result.
+    //
+    // TODO(davidben): Keep everything as the appropriate platform type.
+    FD_SET(static_cast<SOCKET>(sock), &read_fds);
+#else
     FD_SET(sock, &read_fds);
+#endif
     int ret = select(sock + 1, &read_fds, NULL, NULL, NULL);
     if (ret <= 0) {
       perror("select");
@@ -185,7 +232,12 @@ static bool DoConnection(SSL_CTX *ctx,
                          std::map<std::string, std::string> args_map,
                          bool (*cb)(SSL *ssl, int sock)) {
   int sock = -1;
-  if (!Connect(&sock, args_map["-connect"])) {
+  if (args_map.count("-http-tunnel") != 0) {
+    if (!Connect(&sock, args_map["-http-tunnel"]) ||
+        !DoHTTPTunnel(sock, args_map["-connect"])) {
+      return false;
+    }
+  } else if (!Connect(&sock, args_map["-connect"])) {
     return false;
   }
 
@@ -224,7 +276,13 @@ static bool DoConnection(SSL_CTX *ctx,
       return false;
     }
     SSL_set_session(ssl.get(), session.get());
-  } else if (resume_session) {
+  }
+
+  if (args_map.count("-renegotiate-freely") != 0) {
+    SSL_set_renegotiate_mode(ssl.get(), ssl_renegotiate_freely);
+  }
+
+  if (resume_session) {
     SSL_set_session(ssl.get(), resume_session.get());
   }
 
@@ -239,10 +297,59 @@ static bool DoConnection(SSL_CTX *ctx,
     return false;
   }
 
+  if (args_map.count("-early-data") != 0 && SSL_in_early_data(ssl.get())) {
+    int ed_size = args_map["-early-data"].size();
+    int ssl_ret = SSL_write(ssl.get(), args_map["-early-data"].data(), ed_size);
+    if (ssl_ret <= 0) {
+      int ssl_err = SSL_get_error(ssl.get(), ssl_ret);
+      fprintf(stderr, "Error while writing: %d\n", ssl_err);
+      ERR_print_errors_cb(PrintErrorCallback, stderr);
+      return false;
+    } else if (ssl_ret != ed_size) {
+      fprintf(stderr, "Short write from SSL_write.\n");
+      return false;
+    }
+  }
+
   fprintf(stderr, "Connected.\n");
-  PrintConnectionInfo(ssl.get());
+  bssl::UniquePtr<BIO> bio_stderr(BIO_new_fp(stderr, BIO_NOCLOSE));
+  PrintConnectionInfo(bio_stderr.get(), ssl.get());
 
   return cb(ssl.get(), sock);
+}
+
+static bool GetTLS13Variant(tls13_variant_t *out, const std::string &in) {
+  if (in == "draft") {
+    *out = tls13_default;
+    return true;
+  }
+  if (in == "experiment") {
+    *out = tls13_experiment;
+    return true;
+  }
+  if (in == "experiment2") {
+    *out = tls13_experiment2;
+    return true;
+  }
+  if (in == "experiment3") {
+    *out = tls13_experiment3;
+    return true;
+  }
+  return false;
+}
+
+static void InfoCallback(const SSL *ssl, int type, int value) {
+  switch (type) {
+    case SSL_CB_HANDSHAKE_START:
+      fprintf(stderr, "Handshake started.\n");
+      break;
+    case SSL_CB_HANDSHAKE_DONE:
+      fprintf(stderr, "Handshake done.\n");
+      break;
+    case SSL_CB_CONNECT_LOOP:
+      fprintf(stderr, "Handshake progress: %s\n", SSL_state_string_long(ssl));
+      break;
+  }
 }
 
 bool Client(const std::vector<std::string> &args) {
@@ -257,7 +364,7 @@ bool Client(const std::vector<std::string> &args) {
     return false;
   }
 
-  bssl::UniquePtr<SSL_CTX> ctx(SSL_CTX_new(SSLv23_client_method()));
+  bssl::UniquePtr<SSL_CTX> ctx(SSL_CTX_new(TLS_method()));
 
   const char *keylog_file = getenv("SSLKEYLOGFILE");
   if (keylog_file) {
@@ -270,21 +377,27 @@ bool Client(const std::vector<std::string> &args) {
   }
 
   if (args_map.count("-cipher") != 0 &&
-      !SSL_CTX_set_cipher_list(ctx.get(), args_map["-cipher"].c_str())) {
+      !SSL_CTX_set_strict_cipher_list(ctx.get(), args_map["-cipher"].c_str())) {
     fprintf(stderr, "Failed setting cipher list\n");
     return false;
   }
 
-  if (args_map.count("-max-version") != 0) {
-    uint16_t version;
-    if (!VersionFromString(&version, args_map["-max-version"])) {
-      fprintf(stderr, "Unknown protocol version: '%s'\n",
-              args_map["-max-version"].c_str());
-      return false;
-    }
-    if (!SSL_CTX_set_max_proto_version(ctx.get(), version)) {
-      return false;
-    }
+  if (args_map.count("-curves") != 0 &&
+      !SSL_CTX_set1_curves_list(ctx.get(), args_map["-curves"].c_str())) {
+    fprintf(stderr, "Failed setting curves list\n");
+    return false;
+  }
+
+  uint16_t max_version = TLS1_3_VERSION;
+  if (args_map.count("-max-version") != 0 &&
+      !VersionFromString(&max_version, args_map["-max-version"])) {
+    fprintf(stderr, "Unknown protocol version: '%s'\n",
+            args_map["-max-version"].c_str());
+    return false;
+  }
+
+  if (!SSL_CTX_set_max_proto_version(ctx.get(), max_version)) {
+    return false;
   }
 
   if (args_map.count("-min-version") != 0) {
@@ -361,12 +474,15 @@ bool Client(const std::vector<std::string> &args) {
 
   if (args_map.count("-key") != 0) {
     const std::string &key = args_map["-key"];
-    if (!SSL_CTX_use_PrivateKey_file(ctx.get(), key.c_str(), SSL_FILETYPE_PEM)) {
+    if (!SSL_CTX_use_PrivateKey_file(ctx.get(), key.c_str(),
+                                     SSL_FILETYPE_PEM)) {
       fprintf(stderr, "Failed to load private key: %s\n", key.c_str());
       return false;
     }
-    if (!SSL_CTX_use_certificate_chain_file(ctx.get(), key.c_str())) {
-      fprintf(stderr, "Failed to load cert chain: %s\n", key.c_str());
+    const std::string &cert =
+        args_map.count("-cert") != 0 ? args_map["-cert"] : key;
+    if (!SSL_CTX_use_certificate_chain_file(ctx.get(), cert.c_str())) {
+      fprintf(stderr, "Failed to load cert chain: %s\n", cert.c_str());
       return false;
     }
   }
@@ -388,9 +504,48 @@ bool Client(const std::vector<std::string> &args) {
     SSL_CTX_set_grease_enabled(ctx.get(), 1);
   }
 
-  if (args_map.count("-resume") != 0 &&
-      !DoConnection(ctx.get(), args_map, &WaitForSession)) {
-    return false;
+  if (args_map.count("-root-certs") != 0) {
+    if (!SSL_CTX_load_verify_locations(
+            ctx.get(), args_map["-root-certs"].c_str(), nullptr)) {
+      fprintf(stderr, "Failed to load root certificates.\n");
+      ERR_print_errors_cb(PrintErrorCallback, stderr);
+      return false;
+    }
+    SSL_CTX_set_verify(ctx.get(), SSL_VERIFY_PEER, nullptr);
+  }
+
+  if (args_map.count("-early-data") != 0) {
+    SSL_CTX_set_early_data_enabled(ctx.get(), 1);
+  }
+
+  if (args_map.count("-tls13-variant") != 0) {
+    tls13_variant_t variant;
+    if (!GetTLS13Variant(&variant, args_map["-tls13-variant"])) {
+      fprintf(stderr, "Unknown TLS 1.3 variant: %s\n",
+              args_map["-tls13-variant"].c_str());
+      return false;
+    }
+    SSL_CTX_set_tls13_variant(ctx.get(), variant);
+  }
+
+  if (args_map.count("-ed25519") != 0) {
+    SSL_CTX_set_ed25519_enabled(ctx.get(), 1);
+  }
+
+  if (args_map.count("-debug") != 0) {
+    SSL_CTX_set_info_callback(ctx.get(), InfoCallback);
+  }
+
+  if (args_map.count("-test-resumption") != 0) {
+    if (args_map.count("-session-in") != 0) {
+      fprintf(stderr,
+              "Flags -session-in and -test-resumption are incompatible.\n");
+      return false;
+    }
+
+    if (!DoConnection(ctx.get(), args_map, &WaitForSession)) {
+      return false;
+    }
   }
 
   return DoConnection(ctx.get(), args_map, &TransferData);
