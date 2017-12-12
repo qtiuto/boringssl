@@ -787,3 +787,98 @@ TEST(CBSTest, BitString) {
               CBS_asn1_bitstring_has_bit(&cbs, test.bit));
   }
 }
+
+TEST(CBBTest, AddOIDFromText) {
+  const struct {
+    const char *text;
+    std::vector<uint8_t> der;
+  } kValidOIDs[] = {
+      // Some valid values.
+      {"0.0", {0x00}},
+      {"0.2.3.4", {0x2, 0x3, 0x4}},
+      {"1.2.3.4", {0x2a, 0x3, 0x4}},
+      {"2.2.3.4", {0x52, 0x3, 0x4}},
+      {"1.2.840.113554.4.1.72585",
+       {0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x04, 0x01, 0x84, 0xb7, 0x09}},
+      // Test edge cases around the first component.
+      {"0.39", {0x27}},
+      {"1.0", {0x28}},
+      {"1.39", {0x4f}},
+      {"2.0", {0x50}},
+      {"2.1", {0x51}},
+      {"2.40", {0x78}},
+      // Edge cases near an overflow.
+      {"1.2.18446744073709551615",
+       {0x2a, 0x81, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f}},
+      {"2.18446744073709551535",
+       {0x81, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f}},
+  };
+
+  const char *kInvalidTexts[] = {
+      // Invalid second component.
+      "0.40",
+      "1.40",
+      // Invalid first component.
+      "3.1",
+      // The empty string is not an OID.
+      "",
+      // No empty components.
+      ".1.2.3.4.5",
+      "1..2.3.4.5",
+      "1.2.3.4.5.",
+      // There must be at least two components.
+      "1",
+      // No extra leading zeros.
+      "00.1.2.3.4",
+      "01.1.2.3.4",
+      // Overflow for both components or 40*A + B.
+      "1.2.18446744073709551616",
+      "2.18446744073709551536",
+  };
+
+  const std::vector<uint8_t> kInvalidDER[] = {
+      // The empty string is not an OID.
+      {},
+      // Non-minimal representation.
+      {0x80, 0x01},
+      // Overflow. This is the DER representation of
+      // 1.2.840.113554.4.1.72585.18446744073709551616. (The final value is
+      // 2^64.)
+      {0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x04, 0x01, 0x84, 0xb7, 0x09,
+       0x82, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00},
+  };
+
+  for (const auto &t : kValidOIDs) {
+    SCOPED_TRACE(t.text);
+
+    bssl::ScopedCBB cbb;
+    ASSERT_TRUE(CBB_init(cbb.get(), 0));
+    ASSERT_TRUE(CBB_add_asn1_oid_from_text(cbb.get(), t.text, strlen(t.text)));
+    uint8_t *out;
+    size_t len;
+    ASSERT_TRUE(CBB_finish(cbb.get(), &out, &len));
+    bssl::UniquePtr<uint8_t> free_out(out);
+    EXPECT_EQ(Bytes(t.der), Bytes(out, len));
+
+    CBS cbs;
+    CBS_init(&cbs, t.der.data(), t.der.size());
+    bssl::UniquePtr<char> text(CBS_asn1_oid_to_text(&cbs));
+    ASSERT_TRUE(text.get());
+    EXPECT_STREQ(t.text, text.get());
+  }
+
+  for (const char *t : kInvalidTexts) {
+    SCOPED_TRACE(t);
+    bssl::ScopedCBB cbb;
+    ASSERT_TRUE(CBB_init(cbb.get(), 0));
+    EXPECT_FALSE(CBB_add_asn1_oid_from_text(cbb.get(), t, strlen(t)));
+  }
+
+  for (const auto &t : kInvalidDER) {
+    SCOPED_TRACE(Bytes(t));
+    CBS cbs;
+    CBS_init(&cbs, t.data(), t.size());
+    bssl::UniquePtr<char> text(CBS_asn1_oid_to_text(&cbs));
+    EXPECT_FALSE(text);
+  }
+}

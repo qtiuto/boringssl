@@ -358,10 +358,17 @@ func (hs *serverHandshakeState) doTLS13Handshake() error {
 	c := hs.c
 	config := c.config
 
+	// We've read the ClientHello, so the next record in draft 22 must be
+	// preceded with ChangeCipherSpec.
+	if isDraft22(c.wireVersion) {
+		c.expectTLS13ChangeCipherSpec = true
+	}
+
 	hs.hello = &serverHelloMsg{
 		isDTLS:                c.isDTLS,
 		vers:                  c.wireVersion,
 		sessionId:             hs.clientHello.sessionId,
+		compressionMethod:     config.Bugs.SendCompressionMethod,
 		versOverride:          config.Bugs.SendServerHelloVersion,
 		supportedVersOverride: config.Bugs.SendServerSupportedExtensionVersion,
 		customExtension:       config.Bugs.CustomUnencryptedExtension,
@@ -526,7 +533,9 @@ ResendHelloRetryRequest:
 	}
 	helloRetryRequest := &helloRetryRequestMsg{
 		vers:                c.wireVersion,
+		sessionId:           hs.clientHello.sessionId,
 		cipherSuite:         cipherSuite,
+		compressionMethod:   config.Bugs.SendCompressionMethod,
 		duplicateExtensions: config.Bugs.DuplicateHelloRetryRequestExtensions,
 	}
 
@@ -586,6 +595,10 @@ ResendHelloRetryRequest:
 		hs.writeServerHash(helloRetryRequest.marshal())
 		c.writeRecord(recordTypeHandshake, helloRetryRequest.marshal())
 		c.flushHandshake()
+
+		if !c.config.Bugs.SkipChangeCipherSpec && isDraft22(c.wireVersion) {
+			c.writeRecord(recordTypeChangeCipherSpec, []byte{1})
+		}
 
 		if hs.clientHello.hasEarlyData {
 			c.skipEarlyData = true
@@ -782,7 +795,11 @@ ResendHelloRetryRequest:
 	}
 	c.flushHandshake()
 
-	if isResumptionExperiment(c.wireVersion) {
+	if !c.config.Bugs.SkipChangeCipherSpec && isResumptionExperiment(c.wireVersion) && !sendHelloRetryRequest {
+		c.writeRecord(recordTypeChangeCipherSpec, []byte{1})
+	}
+
+	for i := 0; i < c.config.Bugs.SendExtraChangeCipherSpec; i++ {
 		c.writeRecord(recordTypeChangeCipherSpec, []byte{1})
 	}
 
@@ -981,11 +998,10 @@ ResendHelloRetryRequest:
 			}
 		}
 	}
-
-	if isResumptionClientCCSExperiment(c.wireVersion) && !c.skipEarlyData {
-		if err := c.readRecord(recordTypeChangeCipherSpec); err != nil {
-			return err
-		}
+	if isResumptionClientCCSExperiment(c.wireVersion) && !isDraft22(c.wireVersion) && !hs.clientHello.hasEarlyData {
+		// Early versions of the middlebox hacks inserted
+		// ChangeCipherSpec differently on 0-RTT and 2-RTT handshakes.
+		c.expectTLS13ChangeCipherSpec = true
 	}
 
 	// Switch input stream to handshake traffic keys.

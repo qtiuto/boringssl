@@ -419,6 +419,12 @@ NextCipherSuite:
 			earlyLabel = earlyTrafficLabelDraft21
 		}
 
+		if !c.config.Bugs.SkipChangeCipherSpec && isDraft22(session.wireVersion) {
+			c.wireVersion = session.wireVersion
+			c.writeRecord(recordTypeChangeCipherSpec, []byte{1})
+			c.wireVersion = 0
+		}
+
 		earlyTrafficSecret := finishedHash.deriveSecret(earlyLabel)
 		c.useOutTrafficSecret(session.wireVersion, pskCipherSuite, earlyTrafficSecret)
 		for _, earlyData := range c.config.Bugs.SendEarlyData {
@@ -479,9 +485,22 @@ NextCipherSuite:
 	c.vers = serverVersion
 	c.haveVers = true
 
+	if isDraft22(c.wireVersion) {
+		// The first server message must be followed by a ChangeCipherSpec.
+		c.expectTLS13ChangeCipherSpec = true
+	}
+
 	helloRetryRequest, haveHelloRetryRequest := msg.(*helloRetryRequestMsg)
 	var secondHelloBytes []byte
 	if haveHelloRetryRequest {
+		if isDraft22(c.wireVersion) {
+			// Explicitly read the ChangeCipherSpec now; it should
+			// be attached to the first flight, not the second flight.
+			if err := c.readTLS13ChangeCipherSpec(); err != nil {
+				return err
+			}
+		}
+
 		c.out.resetCipher()
 		if len(helloRetryRequest.cookie) > 0 {
 			hello.tls13Cookie = helloRetryRequest.cookie
@@ -705,6 +724,12 @@ NextCipherSuite:
 func (hs *clientHandshakeState) doTLS13Handshake() error {
 	c := hs.c
 
+	if isResumptionExperiment(c.wireVersion) && !isDraft22(c.wireVersion) {
+		// Early versions of the middlebox hacks inserted
+		// ChangeCipherSpec differently on 0-RTT and 2-RTT handshakes.
+		c.expectTLS13ChangeCipherSpec = true
+	}
+
 	if isResumptionExperiment(c.wireVersion) && !bytes.Equal(hs.hello.sessionId, hs.serverHello.sessionId) {
 		return errors.New("tls: session IDs did not match.")
 	}
@@ -759,12 +784,6 @@ func (hs *clientHandshakeState) doTLS13Handshake() error {
 	} else {
 		hs.finishedHash.nextSecret()
 		hs.finishedHash.addEntropy(zeroSecret)
-	}
-
-	if isResumptionExperiment(c.wireVersion) {
-		if err := c.readRecord(recordTypeChangeCipherSpec); err != nil {
-			return err
-		}
 	}
 
 	clientLabel := clientHandshakeTrafficLabel
@@ -979,7 +998,11 @@ func (hs *clientHandshakeState) doTLS13Handshake() error {
 		}
 	}
 
-	if isResumptionClientCCSExperiment(c.wireVersion) {
+	if !c.config.Bugs.SkipChangeCipherSpec && isResumptionClientCCSExperiment(c.wireVersion) && !hs.hello.hasEarlyData {
+		c.writeRecord(recordTypeChangeCipherSpec, []byte{1})
+	}
+
+	for i := 0; i < c.config.Bugs.SendExtraChangeCipherSpec; i++ {
 		c.writeRecord(recordTypeChangeCipherSpec, []byte{1})
 	}
 

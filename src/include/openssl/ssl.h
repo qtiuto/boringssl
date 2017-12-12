@@ -593,6 +593,7 @@ OPENSSL_EXPORT int DTLSv1_handle_timeout(SSL *ssl);
 
 #define TLS1_3_DRAFT_VERSION 0x7f12
 #define TLS1_3_DRAFT21_VERSION 0x7f15
+#define TLS1_3_DRAFT22_VERSION 0x7f16
 #define TLS1_3_EXPERIMENT_VERSION 0x7e01
 #define TLS1_3_EXPERIMENT2_VERSION 0x7e02
 #define TLS1_3_EXPERIMENT3_VERSION 0x7e03
@@ -1124,16 +1125,7 @@ enum ssl_private_key_result_t {
 // key hooks. This is used to off-load signing operations to a custom,
 // potentially asynchronous, backend. Metadata about the key such as the type
 // and size are parsed out of the certificate.
-//
-// TODO(davidben): This API has a number of legacy hooks. Remove the last
-// consumer of |sign_digest| and trim it.
 struct ssl_private_key_method_st {
-  // type is ignored and should be NULL.
-  int (*type)(SSL *ssl);
-
-  // max_signature_len is ignored and should be NULL.
-  size_t (*max_signature_len)(SSL *ssl);
-
   // sign signs the message |in| in using the specified signature algorithm. On
   // success, it returns |ssl_private_key_success| and writes at most |max_out|
   // bytes of signature data to |out| and sets |*out_len| to the number of bytes
@@ -1154,30 +1146,6 @@ struct ssl_private_key_method_st {
                                         size_t max_out,
                                         uint16_t signature_algorithm,
                                         const uint8_t *in, size_t in_len);
-
-  // sign_digest signs |in_len| bytes of digest from |in|. |md| is the hash
-  // function used to calculate |in|. On success, it returns
-  // |ssl_private_key_success| and writes at most |max_out| bytes of signature
-  // data to |out|. On failure, it returns |ssl_private_key_failure|. If the
-  // operation has not completed, it returns |ssl_private_key_retry|. |sign|
-  // should arrange for the high-level operation on |ssl| to be retried when the
-  // operation is completed. This will result in a call to |complete|.
-  //
-  // If the key is an RSA key, implementations must use PKCS#1 padding. |in| is
-  // the digest itself, so the DigestInfo prefix, if any, must be prepended by
-  // |sign|. If |md| is |EVP_md5_sha1|, there is no prefix.
-  //
-  // It is an error to call |sign_digest| while another private key operation is
-  // in progress on |ssl|.
-  //
-  // This function is deprecated. Implement |sign| instead.
-  //
-  // TODO(davidben): Remove this function.
-  enum ssl_private_key_result_t (*sign_digest)(SSL *ssl, uint8_t *out,
-                                               size_t *out_len, size_t max_out,
-                                               const EVP_MD *md,
-                                               const uint8_t *in,
-                                               size_t in_len);
 
   // decrypt decrypts |in_len| bytes of encrypted data from |in|. On success it
   // returns |ssl_private_key_success|, writes at most |max_out| bytes of
@@ -3255,6 +3223,7 @@ enum tls13_variant_t {
   tls13_experiment2 = 2,
   tls13_experiment3 = 3,
   tls13_draft21 = 4,
+  tls13_draft22 = 5,
 };
 
 // SSL_CTX_set_tls13_variant sets which variant of TLS 1.3 we negotiate. On the
@@ -3507,6 +3476,12 @@ OPENSSL_EXPORT size_t SSL_max_seal_overhead(const SSL *ssl);
 // client-sent ticket age and the server-computed value in TLS 1.3 server
 // connections which resumed a session.
 OPENSSL_EXPORT int32_t SSL_get_ticket_age_skew(const SSL *ssl);
+
+// SSL_CTX_set_false_start_allowed_without_alpn configures whether connections
+// on |ctx| may use False Start (if |SSL_MODE_ENABLE_FALSE_START| is enabled)
+// without negotiating ALPN.
+OPENSSL_EXPORT void SSL_CTX_set_false_start_allowed_without_alpn(SSL_CTX *ctx,
+                                                                 int allowed);
 
 
 // Deprecated functions.
@@ -3975,18 +3950,6 @@ OPENSSL_EXPORT int SSL_set_tmp_ecdh(SSL *ssl, const EC_KEY *ec_key);
 // library.
 OPENSSL_EXPORT int SSL_add_dir_cert_subjects_to_stack(STACK_OF(X509_NAME) *out,
                                                       const char *dir);
-
-// SSL_set_private_key_digest_prefs copies |num_digests| NIDs from |digest_nids|
-// into |ssl|. These digests will be used, in decreasing order of preference,
-// when signing with |ssl|'s private key. It returns one on success and zero on
-// error.
-//
-// Use |SSL_set_signing_algorithm_prefs| instead.
-//
-// TODO(davidben): Remove this API when callers have been updated.
-OPENSSL_EXPORT int SSL_set_private_key_digest_prefs(SSL *ssl,
-                                                    const int *digest_nids,
-                                                    size_t num_digests);
 
 // SSL_set_verify_result calls |abort| unless |result| is |X509_V_OK|.
 //
@@ -4597,6 +4560,7 @@ OPENSSL_EXPORT bool SealRecord(SSL *ssl, Span<uint8_t> out_prefix,
 #define SSL_R_UNEXPECTED_EXTENSION_ON_EARLY_DATA 279
 #define SSL_R_NO_SUPPORTED_VERSIONS_ENABLED 280
 #define SSL_R_APPLICATION_DATA_INSTEAD_OF_HANDSHAKE 281
+#define SSL_R_EMPTY_HELLO_RETRY_REQUEST 282
 #define SSL_R_SSLV3_ALERT_CLOSE_NOTIFY 1000
 #define SSL_R_SSLV3_ALERT_UNEXPECTED_MESSAGE 1010
 #define SSL_R_SSLV3_ALERT_BAD_RECORD_MAC 1020

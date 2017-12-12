@@ -128,11 +128,12 @@ const Flag<bool> kBoolFlags[] = {
   { "-allow-unknown-alpn-protos", &TestConfig::allow_unknown_alpn_protos },
   { "-enable-ed25519", &TestConfig::enable_ed25519 },
   { "-use-custom-verify-callback", &TestConfig::use_custom_verify_callback },
+  { "-allow-false-start-without-alpn",
+    &TestConfig::allow_false_start_without_alpn },
 };
 
 const Flag<std::string> kStringFlags[] = {
   { "-write-settings", &TestConfig::write_settings },
-  { "-digest-prefs", &TestConfig::digest_prefs },
   { "-key-file", &TestConfig::key_file },
   { "-cert-file", &TestConfig::cert_file },
   { "-expect-server-name", &TestConfig::expected_server_name },

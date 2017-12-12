@@ -295,11 +295,6 @@ int ssl_write_client_hello(SSL_HANDSHAKE *hs) {
     return 0;
   }
 
-  // Renegotiations do not participate in session resumption.
-  int has_session_id = ssl->session != NULL &&
-                       !ssl->s3->initial_handshake_complete &&
-                       ssl->session->session_id_length > 0;
-
   CBB child;
   if (!CBB_add_u16(&body, hs->client_version) ||
       !CBB_add_bytes(&body, ssl->s3->client_random, SSL3_RANDOM_SIZE) ||
@@ -307,19 +302,10 @@ int ssl_write_client_hello(SSL_HANDSHAKE *hs) {
     return 0;
   }
 
-  if (has_session_id) {
-    if (!CBB_add_bytes(&child, ssl->session->session_id,
-                       ssl->session->session_id_length)) {
-      return 0;
-    }
-  } else {
-    // In TLS 1.3 experimental encodings, send a fake placeholder session ID
-    // when we do not otherwise have one to send.
-    if (hs->max_version >= TLS1_3_VERSION &&
-        ssl_is_resumption_variant(ssl->tls13_variant) &&
-        !CBB_add_bytes(&child, hs->session_id, hs->session_id_len)) {
-      return 0;
-    }
+  // Do not send a session ID on renegotiation.
+  if (!ssl->s3->initial_handshake_complete &&
+      !CBB_add_bytes(&child, hs->session_id, hs->session_id_len)) {
+    return 0;
   }
 
   if (SSL_is_dtls(ssl)) {
@@ -472,7 +458,13 @@ static enum ssl_hs_wait_t do_start_connect(SSL_HANDSHAKE *hs) {
 
   // Initialize a random session ID for the experimental TLS 1.3 variant
   // requiring a session id.
-  if (ssl_is_resumption_variant(ssl->tls13_variant)) {
+  if (ssl->session != nullptr &&
+      !ssl->s3->initial_handshake_complete &&
+      ssl->session->session_id_length > 0) {
+    hs->session_id_len = ssl->session->session_id_length;
+    OPENSSL_memcpy(hs->session_id, ssl->session->session_id,
+                   hs->session_id_len);
+  } else if (ssl_is_resumption_variant(ssl->tls13_variant)) {
     hs->session_id_len = sizeof(hs->session_id);
     if (!RAND_bytes(hs->session_id, hs->session_id_len)) {
       return ssl_hs_error;
@@ -498,6 +490,12 @@ static enum ssl_hs_wait_t do_enter_early_data(SSL_HANDSHAKE *hs) {
   if (!hs->early_data_offered) {
     hs->state = state_read_server_hello;
     return ssl_hs_ok;
+  }
+
+  ssl->s3->aead_write_ctx->SetVersionIfNullCipher(ssl->session->ssl_version);
+  if (ssl_is_draft22(ssl->session->ssl_version) &&
+      !ssl->method->add_change_cipher_spec(ssl)) {
+    return ssl_hs_error;
   }
 
   if (!tls13_init_early_key_schedule(hs, ssl->session->master_key,
@@ -1514,13 +1512,25 @@ static enum ssl_hs_wait_t do_send_client_finished(SSL_HANDSHAKE *hs) {
 static bool can_false_start(const SSL_HANDSHAKE *hs) {
   SSL *const ssl = hs->ssl;
 
-  // False Start only for TLS 1.2 with an ECDHE+AEAD cipher and ALPN or NPN.
-  return !SSL_is_dtls(ssl) &&
-         SSL_version(ssl) == TLS1_2_VERSION &&
-         (!ssl->s3->alpn_selected.empty() ||
-          !ssl->s3->next_proto_negotiated.empty()) &&
-         hs->new_cipher->algorithm_mkey == SSL_kECDHE &&
-         hs->new_cipher->algorithm_mac == SSL_AEAD;
+  // False Start only for TLS 1.2 with an ECDHE+AEAD cipher.
+  if (SSL_is_dtls(ssl) ||
+      SSL_version(ssl) != TLS1_2_VERSION ||
+      hs->new_cipher->algorithm_mkey != SSL_kECDHE ||
+      hs->new_cipher->algorithm_mac != SSL_AEAD) {
+    return false;
+  }
+
+  // Additionally require ALPN or NPN by default.
+  //
+  // TODO(davidben): Can this constraint be relaxed globally now that cipher
+  // suite requirements have been relaxed?
+  if (!ssl->ctx->false_start_allowed_without_alpn &&
+      ssl->s3->alpn_selected.empty() &&
+      ssl->s3->next_proto_negotiated.empty()) {
+    return false;
+  }
+
+  return true;
 }
 
 static enum ssl_hs_wait_t do_finish_flight(SSL_HANDSHAKE *hs) {
