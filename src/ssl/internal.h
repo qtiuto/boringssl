@@ -328,11 +328,11 @@ class Array {
 
   // CopyFrom replaces the array with a newly-allocated copy of |in|. It returns
   // true on success and false on error.
-  bool CopyFrom(Span<const uint8_t> in) {
+  bool CopyFrom(Span<const T> in) {
     if (!Init(in.size())) {
       return false;
     }
-    OPENSSL_memcpy(data_, in.data(), in.size());
+    OPENSSL_memcpy(data_, in.data(), sizeof(T) * in.size());
     return true;
   }
 
@@ -342,7 +342,7 @@ class Array {
 };
 
 // CBBFinishArray behaves like |CBB_finish| but stores the result in an Array.
-bool CBBFinishArray(CBB *cbb, Array<uint8_t> *out);
+OPENSSL_EXPORT bool CBBFinishArray(CBB *cbb, Array<uint8_t> *out);
 
 
 // Protocol versions.
@@ -392,31 +392,9 @@ bool ssl_negotiate_version(SSL_HANDSHAKE *hs, uint8_t *out_alert,
 // call this function before the version is determined.
 uint16_t ssl_protocol_version(const SSL *ssl);
 
-// ssl_is_draft21 returns whether the version corresponds to a draft21 TLS 1.3
+// ssl_is_draft28 returns whether the version corresponds to a draft28 TLS 1.3
 // variant.
-bool ssl_is_draft21(uint16_t version);
-
-// ssl_is_draft22 returns whether the version corresponds to a draft22 TLS 1.3
-// variant.
-bool ssl_is_draft22(uint16_t version);
-
-// ssl_is_resumption_experiment returns whether the version corresponds to a
-// TLS 1.3 resumption experiment.
-bool ssl_is_resumption_experiment(uint16_t version);
-
-// ssl_is_resumption_variant returns whether the version corresponds to a
-// TLS 1.3 resumption experiment.
-bool ssl_is_resumption_variant(enum tls13_variant_t variant);
-
-// ssl_is_resumption_client_ccs_experiment returns whether the version
-// corresponds to a TLS 1.3 resumption experiment that sends a client CCS.
-bool ssl_is_resumption_client_ccs_experiment(uint16_t version);
-
-// ssl_is_resumption_record_version_experiment returns whether the version
-// corresponds to a TLS 1.3 resumption experiment that modifies the record
-// version.
-bool ssl_is_resumption_record_version_experiment(uint16_t version);
-
+bool ssl_is_draft28(uint16_t version);
 
 // Cipher suites.
 
@@ -479,9 +457,48 @@ namespace bssl {
 #define SSL_HANDSHAKE_MAC_SHA256 0x2
 #define SSL_HANDSHAKE_MAC_SHA384 0x4
 
-// SSL_MAX_DIGEST is the number of digest types which exist. When adding a new
-// one, update the table in ssl_cipher.c.
-#define SSL_MAX_DIGEST 4
+// An SSLCipherPreferenceList contains a list of SSL_CIPHERs with equal-
+// preference groups. For TLS clients, the groups are moot because the server
+// picks the cipher and groups cannot be expressed on the wire. However, for
+// servers, the equal-preference groups allow the client's preferences to be
+// partially respected. (This only has an effect with
+// SSL_OP_CIPHER_SERVER_PREFERENCE).
+//
+// The equal-preference groups are expressed by grouping SSL_CIPHERs together.
+// All elements of a group have the same priority: no ordering is expressed
+// within a group.
+//
+// The values in |ciphers| are in one-to-one correspondence with
+// |in_group_flags|. (That is, sk_SSL_CIPHER_num(ciphers) is the number of
+// bytes in |in_group_flags|.) The bytes in |in_group_flags| are either 1, to
+// indicate that the corresponding SSL_CIPHER is not the last element of a
+// group, or 0 to indicate that it is.
+//
+// For example, if |in_group_flags| contains all zeros then that indicates a
+// traditional, fully-ordered preference. Every SSL_CIPHER is the last element
+// of the group (i.e. they are all in a one-element group).
+//
+// For a more complex example, consider:
+//   ciphers:        A  B  C  D  E  F
+//   in_group_flags: 1  1  0  0  1  0
+//
+// That would express the following, order:
+//
+//    A         E
+//    B -> D -> F
+//    C
+struct SSLCipherPreferenceList {
+  static constexpr bool kAllowUniquePtr = true;
+
+  SSLCipherPreferenceList() = default;
+  ~SSLCipherPreferenceList();
+
+  bool Init(UniquePtr<STACK_OF(SSL_CIPHER)> ciphers,
+            Span<const bool> in_group_flags);
+
+  UniquePtr<STACK_OF(SSL_CIPHER)> ciphers;
+  bool *in_group_flags = nullptr;
+};
 
 // ssl_cipher_get_evp_aead sets |*out_aead| to point to the correct EVP_AEAD
 // object for |cipher| protocol version |version|. It sets |*out_mac_secret_len|
@@ -499,13 +516,12 @@ const EVP_MD *ssl_get_handshake_digest(uint16_t version,
                                        const SSL_CIPHER *cipher);
 
 // ssl_create_cipher_list evaluates |rule_str|. It sets |*out_cipher_list| to a
-// newly-allocated |ssl_cipher_preference_list_st| containing the result. It
-// returns true on success and false on failure. If |strict| is true, nonsense
-// will be rejected. If false, nonsense will be silently ignored. An empty
-// result is considered an error regardless of |strict|.
-bool ssl_create_cipher_list(
-    struct ssl_cipher_preference_list_st **out_cipher_list,
-    const char *rule_str, bool strict);
+// newly-allocated |SSLCipherPreferenceList| containing the result. It returns
+// true on success and false on failure. If |strict| is true, nonsense will be
+// rejected. If false, nonsense will be silently ignored. An empty result is
+// considered an error regardless of |strict|.
+bool ssl_create_cipher_list(SSLCipherPreferenceList **out_cipher_list,
+                            const char *rule_str, bool strict);
 
 // ssl_cipher_get_value returns the cipher suite id of |cipher|.
 uint16_t ssl_cipher_get_value(const SSL_CIPHER *cipher);
@@ -679,19 +695,26 @@ class SSLAEADContext {
   bool SuffixLen(size_t *out_suffix_len, size_t in_len,
                  size_t extra_in_len) const;
 
+  // CiphertextLen calculates the total ciphertext length written by
+  // |SealScatter| and writes it to |*out_len|. It returns true on success and
+  // false on error. |in_len| and |extra_in_len| should equal the argument of
+  // the same names passed to |SealScatter|.
+  bool CiphertextLen(size_t *out_len, size_t in_len, size_t extra_in_len) const;
+
   // Open authenticates and decrypts |in| in-place. On success, it sets |*out|
   // to the plaintext in |in| and returns true.  Otherwise, it returns
   // false. The output will always be |ExplicitNonceLen| bytes ahead of |in|.
   bool Open(Span<uint8_t> *out, uint8_t type, uint16_t record_version,
-            const uint8_t seqnum[8], Span<uint8_t> in);
+            const uint8_t seqnum[8], Span<const uint8_t> header,
+            Span<uint8_t> in);
 
   // Seal encrypts and authenticates |in_len| bytes from |in| and writes the
   // result to |out|. It returns true on success and false on error.
   //
   // If |in| and |out| alias then |out| + |ExplicitNonceLen| must be == |in|.
   bool Seal(uint8_t *out, size_t *out_len, size_t max_out, uint8_t type,
-            uint16_t record_version, const uint8_t seqnum[8], const uint8_t *in,
-            size_t in_len);
+            uint16_t record_version, const uint8_t seqnum[8],
+            Span<const uint8_t> header, const uint8_t *in, size_t in_len);
 
   // SealScatter encrypts and authenticates |in_len| bytes from |in| and splits
   // the result between |out_prefix|, |out| and |out_suffix|. It returns one on
@@ -710,17 +733,20 @@ class SSLAEADContext {
   // alias anything.
   bool SealScatter(uint8_t *out_prefix, uint8_t *out, uint8_t *out_suffix,
                    uint8_t type, uint16_t record_version,
-                   const uint8_t seqnum[8], const uint8_t *in, size_t in_len,
-                   const uint8_t *extra_in, size_t extra_in_len);
+                   const uint8_t seqnum[8], Span<const uint8_t> header,
+                   const uint8_t *in, size_t in_len, const uint8_t *extra_in,
+                   size_t extra_in_len);
 
   bool GetIV(const uint8_t **out_iv, size_t *out_iv_len) const;
 
  private:
-  // GetAdditionalData writes the additional data into |out| and returns the
-  // number of bytes written.
-  size_t GetAdditionalData(uint8_t out[13], uint8_t type,
-                           uint16_t record_version, const uint8_t seqnum[8],
-                           size_t plaintext_len);
+  // GetAdditionalData returns the additional data, writing into |storage| if
+  // necessary.
+  Span<const uint8_t> GetAdditionalData(uint8_t storage[13], uint8_t type,
+                                        uint16_t record_version,
+                                        const uint8_t seqnum[8],
+                                        size_t plaintext_len,
+                                        Span<const uint8_t> header);
 
   const SSL_CIPHER *cipher_;
   ScopedEVP_AEAD_CTX ctx_;
@@ -739,6 +765,9 @@ class SSLAEADContext {
   // randomly generated, rather than derived from the sequence
   // number.
   bool random_variable_nonce_ : 1;
+  // xor_fixed_nonce_ is true if the fixed nonce should be XOR'd into the
+  // variable nonce rather than prepended.
+  bool xor_fixed_nonce_ : 1;
   // omit_length_in_ad_ is true if the length should be omitted in the
   // AEAD's ad parameter.
   bool omit_length_in_ad_ : 1;
@@ -747,9 +776,8 @@ class SSLAEADContext {
   bool omit_version_in_ad_ : 1;
   // omit_ad_ is true if the AEAD's ad parameter should be omitted.
   bool omit_ad_ : 1;
-  // xor_fixed_nonce_ is true if the fixed nonce should be XOR'd into the
-  // variable nonce rather than prepended.
-  bool xor_fixed_nonce_ : 1;
+  // ad_is_header_ is true if the AEAD's ad parameter is the record header.
+  bool ad_is_header_ : 1;
 };
 
 
@@ -955,6 +983,10 @@ class SSLKeyShare {
   // nullptr on error.
   static UniquePtr<SSLKeyShare> Create(uint16_t group_id);
 
+  // Create deserializes an SSLKeyShare instance previously serialized by
+  // |Serialize|.
+  static UniquePtr<SSLKeyShare> Create(CBS *in);
+
   // GroupID returns the group ID.
   virtual uint16_t GroupID() const PURE_VIRTUAL;
 
@@ -978,6 +1010,14 @@ class SSLKeyShare {
   // send to the peer.
   virtual bool Finish(Array<uint8_t> *out_secret, uint8_t *out_alert,
                       Span<const uint8_t> peer_key) PURE_VIRTUAL;
+
+  // Serialize writes the state of the key exchange to |out|, returning true if
+  // successful and false otherwise.
+  virtual bool Serialize(CBB *out) { return false; }
+
+  // Deserialize initializes the state of the key exchange from |in|, returning
+  // true if successful and false otherwise.  It is called by |Create|.
+  virtual bool Deserialize(CBS *in) { return false; }
 };
 
 // ssl_nid_to_group_id looks up the group corresponding to |nid|. On success, it
@@ -1009,6 +1049,7 @@ struct SSLMessage {
 #define SSL_MAX_HANDSHAKE_FLIGHT 7
 
 extern const uint8_t kHelloRetryRequest[SSL3_RANDOM_SIZE];
+extern const uint8_t kDraftDowngradeRandom[8];
 
 // ssl_max_handshake_message_len returns the maximum number of bytes permitted
 // in a handshake message for |ssl|.
@@ -1244,10 +1285,10 @@ int tls13_derive_resumption_secret(SSL_HANDSHAKE *hs);
 
 // tls13_export_keying_material provides an exporter interface to use the
 // |exporter_secret|.
-int tls13_export_keying_material(SSL *ssl, uint8_t *out, size_t out_len,
-                                 const char *label, size_t label_len,
-                                 const uint8_t *context, size_t context_len,
-                                 int use_context);
+int tls13_export_keying_material(SSL *ssl, Span<uint8_t> out,
+                                 Span<const uint8_t> secret,
+                                 Span<const char> label,
+                                 Span<const uint8_t> context);
 
 // tls13_finished_mac calculates the MAC of the handshake transcript to verify
 // the integrity of the Finished message, and stores the result in |out| and
@@ -1282,6 +1323,8 @@ enum ssl_hs_wait_t {
   ssl_hs_read_message,
   ssl_hs_flush,
   ssl_hs_certificate_selection_pending,
+  ssl_hs_handoff,
+  ssl_hs_handback,
   ssl_hs_x509_lookup,
   ssl_hs_channel_id_lookup,
   ssl_hs_private_key_operation,
@@ -1292,6 +1335,40 @@ enum ssl_hs_wait_t {
   ssl_hs_read_end_of_early_data,
   ssl_hs_read_change_cipher_spec,
   ssl_hs_certificate_verify,
+};
+
+enum ssl_grease_index_t {
+  ssl_grease_cipher = 0,
+  ssl_grease_group,
+  ssl_grease_extension1,
+  ssl_grease_extension2,
+  ssl_grease_version,
+  ssl_grease_ticket_extension,
+  ssl_grease_last_index = ssl_grease_ticket_extension,
+};
+
+enum tls12_server_hs_state_t {
+  state12_start_accept = 0,
+  state12_read_client_hello,
+  state12_select_certificate,
+  state12_tls13,
+  state12_select_parameters,
+  state12_send_server_hello,
+  state12_send_server_certificate,
+  state12_send_server_key_exchange,
+  state12_send_server_hello_done,
+  state12_read_client_certificate,
+  state12_verify_client_certificate,
+  state12_read_client_key_exchange,
+  state12_read_client_certificate_verify,
+  state12_read_change_cipher_spec,
+  state12_process_change_cipher_spec,
+  state12_read_next_proto,
+  state12_read_channel_id,
+  state12_read_client_finished,
+  state12_send_server_finished,
+  state12_finish_server_handshake,
+  state12_done,
 };
 
 struct SSL_HANDSHAKE {
@@ -1321,11 +1398,6 @@ struct SSL_HANDSHAKE {
   // max_version is the maximum accepted protocol version, taking account both
   // |SSL_OP_NO_*| and |SSL_CTX_set_max_proto_version| APIs.
   uint16_t max_version = 0;
-
-  // session_id is the session ID in the ClientHello, used for the experimental
-  // TLS 1.3 variant.
-  uint8_t session_id[SSL_MAX_SSL_SESSION_ID_LENGTH] = {0};
-  uint8_t session_id_len = 0;
 
   size_t hash_len = 0;
   uint8_t secret[EVP_MAX_MD_SIZE] = {0};
@@ -1393,6 +1465,12 @@ struct SSL_HANDSHAKE {
 
   // peer_key is the peer's ECDH key for a TLS 1.2 client.
   Array<uint8_t> peer_key;
+
+  // negotiated_token_binding_version is used by a server to store the
+  // on-the-wire encoding of the Token Binding protocol version to advertise in
+  // the ServerHello/EncryptedExtensions if the Token Binding extension is to be
+  // sent.
+  uint16_t negotiated_token_binding_version;
 
   // server_params, in a TLS 1.2 server, stores the ServerKeyExchange
   // parameters. It has client and server randoms prepended for signing
@@ -1505,6 +1583,9 @@ struct SSL_HANDSHAKE {
   // in progress.
   bool pending_private_key_op:1;
 
+  // grease_seeded is true if |grease_seed| has been initialized.
+  bool grease_seeded:1;
+
   // client_version is the value sent or received in the ClientHello version.
   uint16_t client_version = 0;
 
@@ -1515,6 +1596,20 @@ struct SSL_HANDSHAKE {
   // early_data_written is the amount of early data that has been written by the
   // record layer.
   uint16_t early_data_written = 0;
+
+  // session_id is the session ID in the ClientHello, used for the experimental
+  // TLS 1.3 variant.
+  uint8_t session_id[SSL_MAX_SSL_SESSION_ID_LENGTH] = {0};
+  uint8_t session_id_len = 0;
+
+  // grease_seed is the entropy for GREASE values. It is valid if
+  // |grease_seeded| is true.
+  uint8_t grease_seed[ssl_grease_last_index + 1] = {0};
+
+  // dummy_pq_padding_len, in a server, is the length of the extension that
+  // should be echoed in a ServerHello, or zero if no extension should be
+  // echoed.
+  uint16_t dummy_pq_padding_len = 0;
 };
 
 UniquePtr<SSL_HANDSHAKE> ssl_handshake_new(SSL *ssl);
@@ -1657,47 +1752,46 @@ int ssl_client_cipher_list_contains_cipher(const SSL_CLIENT_HELLO *client_hello,
 
 // GREASE.
 
-enum ssl_grease_index_t {
-  ssl_grease_cipher = 0,
-  ssl_grease_group,
-  ssl_grease_extension1,
-  ssl_grease_extension2,
-  ssl_grease_version,
-  ssl_grease_ticket_extension,
-};
-
-// ssl_get_grease_value returns a GREASE value for |ssl|. For a given
+// ssl_get_grease_value returns a GREASE value for |hs|. For a given
 // connection, the values for each index will be deterministic. This allows the
 // same ClientHello be sent twice for a HelloRetryRequest or the same group be
 // advertised in both supported_groups and key_shares.
-uint16_t ssl_get_grease_value(const SSL *ssl, enum ssl_grease_index_t index);
+uint16_t ssl_get_grease_value(SSL_HANDSHAKE *hs, enum ssl_grease_index_t index);
 
 
 // Signature algorithms.
 
 // tls1_parse_peer_sigalgs parses |sigalgs| as the list of peer signature
-// algorithms and saves them on |hs|. It returns one on success and zero on
+// algorithms and saves them on |hs|. It returns true on success and false on
 // error.
-int tls1_parse_peer_sigalgs(SSL_HANDSHAKE *hs, const CBS *sigalgs);
+bool tls1_parse_peer_sigalgs(SSL_HANDSHAKE *hs, const CBS *sigalgs);
 
 // tls1_get_legacy_signature_algorithm sets |*out| to the signature algorithm
-// that should be used with |pkey| in TLS 1.1 and earlier. It returns one on
-// success and zero if |pkey| may not be used at those versions.
-int tls1_get_legacy_signature_algorithm(uint16_t *out, const EVP_PKEY *pkey);
+// that should be used with |pkey| in TLS 1.1 and earlier. It returns true on
+// success and false if |pkey| may not be used at those versions.
+bool tls1_get_legacy_signature_algorithm(uint16_t *out, const EVP_PKEY *pkey);
 
 // tls1_choose_signature_algorithm sets |*out| to a signature algorithm for use
 // with |hs|'s private key based on the peer's preferences and the algorithms
-// supported. It returns one on success and zero on error.
-int tls1_choose_signature_algorithm(SSL_HANDSHAKE *hs, uint16_t *out);
+// supported. It returns true on success and false on error.
+bool tls1_choose_signature_algorithm(SSL_HANDSHAKE *hs, uint16_t *out);
 
 // tls12_add_verify_sigalgs adds the signature algorithms acceptable for the
-// peer signature to |out|. It returns one on success and zero on error.
-int tls12_add_verify_sigalgs(const SSL *ssl, CBB *out);
+// peer signature to |out|. It returns true on success and false on error. If
+// |for_certs| is true, the potentially more restrictive list of algorithms for
+// certificates is used. Otherwise, the online signature one is used.
+bool tls12_add_verify_sigalgs(const SSL *ssl, CBB *out, bool for_certs);
 
 // tls12_check_peer_sigalg checks if |sigalg| is acceptable for the peer
-// signature. It returns one on success and zero on error, setting |*out_alert|
-// to an alert to send.
-int tls12_check_peer_sigalg(SSL *ssl, uint8_t *out_alert, uint16_t sigalg);
+// signature. It returns true on success and false on error, setting
+// |*out_alert| to an alert to send.
+bool tls12_check_peer_sigalg(const SSL *ssl, uint8_t *out_alert,
+                             uint16_t sigalg);
+
+// tls12_has_different_verify_sigalgs_for_certs returns whether |ssl| has a
+// different, more restrictive, list of signature algorithms acceptable for the
+// certificate than the online signature.
+bool tls12_has_different_verify_sigalgs_for_certs(const SSL *ssl);
 
 
 // Underdocumented functions.
@@ -1710,7 +1804,12 @@ int tls12_check_peer_sigalg(SSL *ssl, uint8_t *out_alert, uint16_t sigalg);
 #define NAMED_CURVE_TYPE 3
 
 struct CERT {
-  EVP_PKEY *privatekey;
+  static constexpr bool kAllowUniquePtr = true;
+
+  explicit CERT(const SSL_X509_METHOD *x509_method);
+  ~CERT();
+
+  UniquePtr<EVP_PKEY> privatekey;
 
   // chain contains the certificate chain, with the leaf at the beginning. The
   // first element of |chain| may be NULL to indicate that the leaf certificate
@@ -1718,35 +1817,34 @@ struct CERT {
   //   If |chain| != NULL -> len(chain) >= 1
   //   If |chain[0]| == NULL -> len(chain) >= 2.
   //   |chain[1..]| != NULL
-  STACK_OF(CRYPTO_BUFFER) *chain;
+  UniquePtr<STACK_OF(CRYPTO_BUFFER)> chain;
 
   // x509_chain may contain a parsed copy of |chain[1..]|. This is only used as
   // a cache in order to implement “get0” functions that return a non-owning
   // pointer to the certificate chain.
-  STACK_OF(X509) *x509_chain;
+  STACK_OF(X509) *x509_chain = nullptr;
 
   // x509_leaf may contain a parsed copy of the first element of |chain|. This
   // is only used as a cache in order to implement “get0” functions that return
   // a non-owning pointer to the certificate chain.
-  X509 *x509_leaf;
+  X509 *x509_leaf = nullptr;
 
   // x509_stash contains the last |X509| object append to the chain. This is a
   // workaround for some third-party code that continue to use an |X509| object
   // even after passing ownership with an “add0” function.
-  X509 *x509_stash;
+  X509 *x509_stash = nullptr;
 
   // key_method, if non-NULL, is a set of callbacks to call for private key
   // operations.
-  const SSL_PRIVATE_KEY_METHOD *key_method;
+  const SSL_PRIVATE_KEY_METHOD *key_method = nullptr;
 
   // x509_method contains pointers to functions that might deal with |X509|
   // compatibility, or might be a no-op, depending on the application.
-  const SSL_X509_METHOD *x509_method;
+  const SSL_X509_METHOD *x509_method = nullptr;
 
-  // sigalgs, if non-NULL, is the set of signature algorithms supported by
+  // sigalgs, if non-empty, is the set of signature algorithms supported by
   // |privatekey| in decreasing order of preference.
-  uint16_t *sigalgs;
-  size_t num_sigalgs;
+  Array<uint16_t> sigalgs;
 
   // Certificate setup callback: if set is called whenever a
   // certificate may be required (client or server). the callback
@@ -1754,23 +1852,23 @@ struct CERT {
   // certificates required. This allows advanced applications
   // to select certificates on the fly: for example based on
   // supported signature algorithms or curves.
-  int (*cert_cb)(SSL *ssl, void *arg);
-  void *cert_cb_arg;
+  int (*cert_cb)(SSL *ssl, void *arg) = nullptr;
+  void *cert_cb_arg = nullptr;
 
   // Optional X509_STORE for certificate validation. If NULL the parent SSL_CTX
   // store is used instead.
-  X509_STORE *verify_store;
+  X509_STORE *verify_store = nullptr;
 
   // Signed certificate timestamp list to be sent to the client, if requested
-  CRYPTO_BUFFER *signed_cert_timestamp_list;
+  UniquePtr<CRYPTO_BUFFER> signed_cert_timestamp_list;
 
   // OCSP response to be sent to the client, if requested.
-  CRYPTO_BUFFER *ocsp_response;
+  UniquePtr<CRYPTO_BUFFER> ocsp_response;
 
   // sid_ctx partitions the session space within a shared session cache or
   // ticket key. Only sessions with a matching value will be accepted.
-  uint8_t sid_ctx_length;
-  uint8_t sid_ctx[SSL_MAX_SID_CTX_LENGTH];
+  uint8_t sid_ctx_length = 0;
+  uint8_t sid_ctx[SSL_MAX_SID_CTX_LENGTH] = {0};
 
   // If enable_early_data is true, early data can be sent and accepted.
   bool enable_early_data:1;
@@ -1861,41 +1959,6 @@ extern const SSL_X509_METHOD ssl_crypto_x509_method;
 // crypto/x509.
 extern const SSL_X509_METHOD ssl_noop_x509_method;
 
-// ssl_cipher_preference_list_st contains a list of SSL_CIPHERs with
-// equal-preference groups. For TLS clients, the groups are moot because the
-// server picks the cipher and groups cannot be expressed on the wire. However,
-// for servers, the equal-preference groups allow the client's preferences to
-// be partially respected. (This only has an effect with
-// SSL_OP_CIPHER_SERVER_PREFERENCE).
-//
-// The equal-preference groups are expressed by grouping SSL_CIPHERs together.
-// All elements of a group have the same priority: no ordering is expressed
-// within a group.
-//
-// The values in |ciphers| are in one-to-one correspondence with
-// |in_group_flags|. (That is, sk_SSL_CIPHER_num(ciphers) is the number of
-// bytes in |in_group_flags|.) The bytes in |in_group_flags| are either 1, to
-// indicate that the corresponding SSL_CIPHER is not the last element of a
-// group, or 0 to indicate that it is.
-//
-// For example, if |in_group_flags| contains all zeros then that indicates a
-// traditional, fully-ordered preference. Every SSL_CIPHER is the last element
-// of the group (i.e. they are all in a one-element group).
-//
-// For a more complex example, consider:
-//   ciphers:        A  B  C  D  E  F
-//   in_group_flags: 1  1  0  0  1  0
-//
-// That would express the following, order:
-//
-//    A         E
-//    B -> D -> F
-//    C
-struct ssl_cipher_preference_list_st {
-  STACK_OF(SSL_CIPHER) *ciphers;
-  uint8_t *in_group_flags;
-};
-
 struct tlsext_ticket_key {
   static constexpr bool kAllowUniquePtr = true;
 
@@ -1938,7 +2001,7 @@ struct SSLContext {
   // configuration.
   enum tls13_variant_t tls13_variant;
 
-  struct ssl_cipher_preference_list_st *cipher_list;
+  SSLCipherPreferenceList *cipher_list;
 
   X509_STORE *cert_store;
   LHASH_OF(SSL_SESSION) *sessions;
@@ -1978,8 +2041,6 @@ struct SSLContext {
   void (*remove_session_cb)(SSL_CTX *ctx, SSL_SESSION *sess);
   SSL_SESSION *(*get_session_cb)(SSL *ssl, const uint8_t *data, int len,
                                  int *copy);
-  SSL_SESSION *(*get_session_cb_legacy)(SSL *ssl, uint8_t *data, int len,
-                                        int *copy);
 
   CRYPTO_refcount_t references;
 
@@ -2180,9 +2241,18 @@ struct SSLContext {
   // ed25519_enabled is whether Ed25519 is advertised in the handshake.
   bool ed25519_enabled:1;
 
+  // rsa_pss_rsae_certs_enabled is whether rsa_pss_rsae_* are supported by the
+  // certificate verifier.
+  bool rsa_pss_rsae_certs_enabled:1;
+
   // false_start_allowed_without_alpn is whether False Start (if
   // |SSL_MODE_ENABLE_FALSE_START| is enabled) is allowed without ALPN.
   bool false_start_allowed_without_alpn:1;
+
+  // handoff indicates that a server should stop after receiving the
+  // ClientHello and pause the handshake in such a way that |SSL_get_error|
+  // returns |SSL_HANDOFF|.
+  bool handoff:1;
 };
 
 // An ssl_shutdown_t describes the shutdown state of one end of the connection,
@@ -2254,6 +2324,10 @@ struct SSL3_STATE {
   // key_update_count is the number of consecutive KeyUpdates received.
   uint8_t key_update_count = 0;
 
+  // The negotiated Token Binding key parameter. Only valid if
+  // |token_binding_negotiated| is set.
+  uint8_t negotiated_token_binding_param = 0;
+
   // skip_early_data instructs the record layer to skip unexpected early data
   // messages when 0RTT is rejected.
   bool skip_early_data:1;
@@ -2296,7 +2370,15 @@ struct SSL3_STATE {
   // wpend_pending is true if we have a pending write outstanding.
   bool wpend_pending:1;
 
-  uint8_t send_alert[2] = {0};
+  // early_data_accepted is true if early data was accepted by the server.
+  bool early_data_accepted:1;
+
+  // draft_downgrade is whether the TLS 1.3 anti-downgrade logic would have
+  // fired, were it not a draft.
+  bool draft_downgrade:1;
+
+  // token_binding_negotiated is set if Token Binding was negotiated.
+  bool token_binding_negotiated:1;
 
   // hs_buf is the buffer of handshake data to process.
   UniquePtr<BUF_MEM> hs_buf;
@@ -2309,6 +2391,11 @@ struct SSL3_STATE {
   // pending_flight_offset is the number of bytes of |pending_flight| which have
   // been successfully written.
   uint32_t pending_flight_offset = 0;
+
+  // ticket_age_skew is the difference, in seconds, between the client-sent
+  // ticket age and the server-computed value in TLS 1.3 server connections
+  // which resumed a session.
+  int32_t ticket_age_skew = 0;
 
   // aead_read_ctx is the current read cipher state.
   UniquePtr<SSLAEADContext> aead_read_ctx;
@@ -2334,6 +2421,8 @@ struct SSL3_STATE {
   uint8_t previous_client_finished_len = 0;
   uint8_t previous_server_finished_len = 0;
   uint8_t previous_server_finished[12] = {0};
+
+  uint8_t send_alert[2] = {0};
 
   // established_session is the session established by the connection. This
   // session is only filled upon the completion of the handshake and is
@@ -2365,10 +2454,12 @@ struct SSL3_STATE {
   //     each are big-endian values.
   uint8_t tlsext_channel_id[64] = {0};
 
-  // ticket_age_skew is the difference, in seconds, between the client-sent
-  // ticket age and the server-computed value in TLS 1.3 server connections
-  // which resumed a session.
-  int32_t ticket_age_skew = 0;
+  // Contains the QUIC transport params received by the peer.
+  Array<uint8_t> peer_quic_transport_params;
+
+  // srtp_profile is the selected SRTP protection profile for
+  // DTLS-SRTP.
+  const SRTP_PROTECTION_PROFILE *srtp_profile = nullptr;
 };
 
 // lengths of messages
@@ -2509,10 +2600,6 @@ struct SSLConnection {
   // further constrainted by |SSL_OP_NO_*|.
   uint16_t conf_min_version;
 
-  // tls13_variant is the variant of TLS 1.3 we are using for this
-  // configuration.
-  enum tls13_variant_t tls13_variant;
-
   uint16_t max_send_fragment;
 
   // There are 2 BIO's even though they are normally both the same. This is so
@@ -2537,17 +2624,21 @@ struct SSLConnection {
   X509_VERIFY_PARAM *param;
 
   // crypto
-  struct ssl_cipher_preference_list_st *cipher_list;
+  SSLCipherPreferenceList *cipher_list;
 
   // session info
 
-  // client cert?
-  // This is used to hold the server certificate used
+  // This is used to hold the local certificate used (i.e. the server
+  // certificate for a server or the client certificate for a client).
   CERT *cert;
 
   // initial_timeout_duration_ms is the default DTLS timeout duration in
   // milliseconds. It's used to initialize the timer any time it's restarted.
   unsigned initial_timeout_duration_ms;
+
+  // tls13_variant is the variant of TLS 1.3 we are using for this
+  // configuration.
+  enum tls13_variant_t tls13_variant;
 
   // session is the configured session to be offered by the client. This session
   // is immutable.
@@ -2587,6 +2678,7 @@ struct SSLConnection {
   uint32_t options;  // protocol behaviour
   uint32_t mode;     // API behaviour
   uint32_t max_cert_list;
+  uint16_t dummy_pq_padding_len;
   char *tlsext_hostname;
   size_t supported_group_list_len;
   uint16_t *supported_group_list;  // our list
@@ -2599,10 +2691,6 @@ struct SSLConnection {
   // DTLS-SRTP.
   STACK_OF(SRTP_PROTECTION_PROFILE) *srtp_profiles;
 
-  // srtp_profile is the selected SRTP protection profile for
-  // DTLS-SRTP.
-  const SRTP_PROTECTION_PROFILE *srtp_profile;
-
   // The client's Channel ID private key.
   EVP_PKEY *tlsext_channel_id_private;
 
@@ -2610,6 +2698,14 @@ struct SSLConnection {
   // format.
   uint8_t *alpn_client_proto_list;
   unsigned alpn_client_proto_list_len;
+
+  // Contains a list of supported Token Binding key parameters.
+  uint8_t *token_binding_params;
+  size_t token_binding_params_len;
+
+  // Contains the QUIC transport params that this endpoint will send.
+  uint8_t *quic_transport_params;
+  size_t quic_transport_params_len;
 
   // renegotiate_mode controls how peer renegotiation attempts are handled.
   enum ssl_renegotiate_mode_t renegotiate_mode;
@@ -2643,8 +2739,21 @@ struct SSLConnection {
   // session space. Only effective on the server side.
   bool retain_only_sha256_of_client_certs:1;
 
-  // early_data_accepted is true if early data was accepted by the server.
-  bool early_data_accepted:1;
+  // handoff indicates that a server should stop after receiving the
+  // ClientHello and pause the handshake in such a way that |SSL_get_error|
+  // returns |SSL_HANDOFF|. This is copied in |SSL_new| from the |SSL_CTX|
+  // element of the same name and may be cleared if the handoff is declined.
+  bool handoff:1;
+
+  // handback indicates that a server should pause the handshake after
+  // finishing operations that require private key material, in such a way that
+  // |SSL_get_error| returns |SSL_HANDBACK|.  It is set by |SSL_apply_handoff|.
+  bool handback : 1;
+
+  // did_dummy_pq_padding is only valid for a client. In that context, it is
+  // true iff the client observed the server echoing a dummy PQ padding
+  // extension.
+  bool did_dummy_pq_padding:1;
 };
 
 // From draft-ietf-tls-tls13-18, used in determining PSK modes.
@@ -2660,10 +2769,8 @@ struct SSLConnection {
 // kMaxEarlyDataSkipped in tls_record.c, which is measured in ciphertext.
 static const size_t kMaxEarlyDataAccepted = 14336;
 
-CERT *ssl_cert_new(const SSL_X509_METHOD *x509_method);
-CERT *ssl_cert_dup(CERT *cert);
+UniquePtr<CERT> ssl_cert_dup(CERT *cert);
 void ssl_cert_clear_certs(CERT *cert);
-void ssl_cert_free(CERT *cert);
 int ssl_set_cert(CERT *cert, UniquePtr<CRYPTO_BUFFER> buffer);
 int ssl_is_key_type_supported(int key_type);
 // ssl_compare_public_and_private_key returns one if |pubkey| is the public
@@ -2685,6 +2792,11 @@ UniquePtr<SSL_SESSION> ssl_session_new(const SSL_X509_METHOD *x509_method);
 UniquePtr<SSL_SESSION> SSL_SESSION_parse(CBS *cbs,
                                          const SSL_X509_METHOD *x509_method,
                                          CRYPTO_BUFFER_POOL *pool);
+
+// ssl_session_serialize writes |in| to |cbb| as if it were serialising a
+// session for Session-ID resumption. It returns one on success and zero on
+// error.
+int ssl_session_serialize(const SSL_SESSION *in, CBB *cbb);
 
 // ssl_session_is_context_valid returns one if |session|'s session ID context
 // matches the one set on |ssl| and zero otherwise.
@@ -2744,13 +2856,9 @@ void ssl_session_rebase_time(SSL *ssl, SSL_SESSION *session);
 void ssl_session_renew_timeout(SSL *ssl, SSL_SESSION *session,
                                uint32_t timeout);
 
-void ssl_cipher_preference_list_free(
-    struct ssl_cipher_preference_list_st *cipher_list);
-
 // ssl_get_cipher_preferences returns the cipher preference list for TLS 1.2 and
 // below.
-const struct ssl_cipher_preference_list_st *ssl_get_cipher_preferences(
-    const SSL *ssl);
+const SSLCipherPreferenceList *ssl_get_cipher_preferences(const SSL *ssl);
 
 void ssl_update_cache(SSL_HANDSHAKE *hs, int mode);
 
@@ -2828,6 +2936,16 @@ ssl_open_record_t dtls1_open_handshake(SSL *ssl, size_t *out_consumed,
                                        uint8_t *out_alert, Span<uint8_t> in);
 void dtls1_next_message(SSL *ssl);
 int dtls1_dispatch_alert(SSL *ssl);
+
+// tls1_configure_aead configures either the read or write direction AEAD (as
+// determined by |direction|) using the keys generated by the TLS KDF. The
+// |key_block_cache| argument is used to store the generated key block, if
+// empty. Otherwise it's assumed that the key block is already contained within
+// it. Returns one on success or zero on error.
+int tls1_configure_aead(SSL *ssl, evp_aead_direction_t direction,
+                        Array<uint8_t> *key_block_cache,
+                        const SSL_CIPHER *cipher,
+                        Span<const uint8_t> iv_override);
 
 int tls1_change_cipher_state(SSL_HANDSHAKE *hs, evp_aead_direction_t direction);
 int tls1_generate_master_secret(SSL_HANDSHAKE *hs, uint8_t *out,

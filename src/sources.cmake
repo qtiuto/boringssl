@@ -10,6 +10,8 @@ set(
   crypto/cipher_extra/test/aes_128_cbc_sha1_tls_implicit_iv_tests.txt
   crypto/cipher_extra/test/aes_128_cbc_sha1_tls_tests.txt
   crypto/cipher_extra/test/aes_128_cbc_sha256_tls_tests.txt
+  crypto/cipher_extra/test/aes_128_ccm_bluetooth_tests.txt
+  crypto/cipher_extra/test/aes_128_ccm_bluetooth_8_tests.txt
   crypto/cipher_extra/test/aes_128_ctr_hmac_sha256.txt
   crypto/cipher_extra/test/aes_128_gcm_siv_tests.txt
   crypto/cipher_extra/test/aes_128_gcm_tests.txt
@@ -42,6 +44,7 @@ set(
   crypto/evp/scrypt_tests.txt
   crypto/fipsmodule/aes/aes_tests.txt
   crypto/fipsmodule/bn/bn_tests.txt
+  crypto/fipsmodule/ec/ec_scalar_base_mult_tests.txt
   crypto/fipsmodule/ec/p256-x86_64_tests.txt
   crypto/fipsmodule/ecdsa/ecdsa_sign_tests.txt
   crypto/fipsmodule/ecdsa/ecdsa_verify_tests.txt
@@ -56,4 +59,14 @@ set(
   crypto/x509/some_names1.pem
   crypto/x509/some_names2.pem
   crypto/x509/some_names3.pem
+  third_party/wycheproof/dsa_test.txt
+  third_party/wycheproof/ecdsa_secp224r1_sha224_test.txt
+  third_party/wycheproof/ecdsa_secp224r1_sha256_test.txt
+  third_party/wycheproof/ecdsa_secp256r1_sha256_test.txt
+  third_party/wycheproof/ecdsa_secp384r1_sha384_test.txt
+  third_party/wycheproof/ecdsa_secp384r1_sha512_test.txt
+  third_party/wycheproof/ecdsa_secp521r1_sha512_test.txt
+  third_party/wycheproof/eddsa_test.txt
+  third_party/wycheproof/rsa_signature_test.txt
+  third_party/wycheproof/x25519_test.txt
 )

@@ -44,6 +44,7 @@ type Conn struct {
 	didResume            bool // whether this connection was a session resumption
 	extendedMasterSecret bool // whether this session used an extended master secret
 	cipherSuite          *cipherSuite
+	earlyCipherSuite     *cipherSuite
 	ocspResponse         []byte // stapled OCSP response
 	sctList              []byte // signed certificate timestamp list
 	peerCertificates     []*x509.Certificate
@@ -61,8 +62,12 @@ type Conn struct {
 	// curveID contains the curve that was used in the handshake, or zero if
 	// not applicable.
 	curveID CurveID
+	// quicTransportParams contains the QUIC transport params received
+	// by the peer.
+	quicTransportParams []byte
 
 	clientRandom, serverRandom [32]byte
+	earlyExporterSecret        []byte
 	exporterSecret             []byte
 	resumptionSecret           []byte
 
@@ -75,6 +80,9 @@ type Conn struct {
 	serverVerify []byte
 
 	channelID *ecdsa.PublicKey
+
+	tokenBindingNegotiated bool
+	tokenBindingParam      uint8
 
 	srtpProtectionProfile uint16
 
@@ -440,6 +448,8 @@ func (hc *halfConn) decrypt(b *block) (ok bool, prefixLen int, contentType recor
 				n := len(payload) - c.Overhead()
 				additionalData[11] = byte(n >> 8)
 				additionalData[12] = byte(n)
+			} else if isDraft28(hc.wireVersion) {
+				additionalData = b.data[:recordHeaderLen]
 			}
 			var err error
 			payload, err = c.Open(payload[:0], nonce, payload, additionalData)
@@ -604,6 +614,12 @@ func (hc *halfConn) encrypt(b *block, explicitIVLen int, typ recordType) (bool, 
 				copy(additionalData[8:], b.data[:3])
 				additionalData[11] = byte(payloadLen >> 8)
 				additionalData[12] = byte(payloadLen)
+			} else if isDraft28(hc.wireVersion) {
+				additionalData = make([]byte, 5)
+				copy(additionalData, b.data[:3])
+				n := len(b.data) - recordHeaderLen
+				additionalData[3] = byte(n >> 8)
+				additionalData[4] = byte(n)
 			}
 
 			c.Seal(payload[:0], nonce, payload, additionalData)
@@ -800,9 +816,6 @@ RestartReadRecord:
 		if c.haveVers {
 			expect = c.vers
 			if c.vers >= VersionTLS13 {
-				expect = VersionTLS10
-			}
-			if isResumptionRecordVersionExperiment(c.wireVersion) {
 				expect = VersionTLS12
 			}
 		} else {
@@ -905,7 +918,7 @@ func (c *Conn) readTLS13ChangeCipherSpec() error {
 
 	// Check they match that we expect.
 	expected := [6]byte{byte(recordTypeChangeCipherSpec), 3, 1, 0, 1, 1}
-	if isResumptionRecordVersionExperiment(c.wireVersion) {
+	if c.vers >= VersionTLS13 {
 		expected[2] = 3
 	}
 	if !bytes.Equal(b.data[:6], expected[:]) {
@@ -1195,7 +1208,7 @@ func (c *Conn) doWriteRecord(typ recordType, data []byte) (n int, err error) {
 			}
 		}
 		vers := c.vers
-		if vers == 0 || vers >= VersionTLS13 {
+		if vers == 0 {
 			// Some TLS servers fail if the record version is
 			// greater than TLS 1.0 for the initial ClientHello.
 			//
@@ -1203,7 +1216,7 @@ func (c *Conn) doWriteRecord(typ recordType, data []byte) (n int, err error) {
 			// layer to {3, 1}.
 			vers = VersionTLS10
 		}
-		if isResumptionRecordVersionExperiment(c.wireVersion) || isResumptionRecordVersionExperiment(c.out.wireVersion) {
+		if c.vers >= VersionTLS13 || c.out.version >= VersionTLS13 {
 			vers = VersionTLS12
 		}
 
@@ -1238,7 +1251,7 @@ func (c *Conn) doWriteRecord(typ recordType, data []byte) (n int, err error) {
 	}
 	c.out.freeBlock(b)
 
-	if typ == recordTypeChangeCipherSpec && !isResumptionExperiment(c.wireVersion) {
+	if typ == recordTypeChangeCipherSpec && c.vers < VersionTLS13 {
 		err = c.out.changeCipherSpec(c.config)
 		if err != nil {
 			return n, c.sendAlertLocked(alertLevelError, err.(alert))
@@ -1561,9 +1574,7 @@ func (c *Conn) processTLS13NewSessionTicket(newSessionTicket *newSessionTicketMs
 		earlyALPN:          c.clientProtocol,
 	}
 
-	if isDraft21(c.wireVersion) {
-		session.masterSecret = deriveSessionPSK(cipherSuite, c.wireVersion, c.resumptionSecret, newSessionTicket.ticketNonce)
-	}
+	session.masterSecret = deriveSessionPSK(cipherSuite, c.wireVersion, c.resumptionSecret, newSessionTicket.ticketNonce)
 
 	cacheKey := clientSessionCacheKey(c.conn.RemoteAddr(), c.config)
 	_, ok := c.config.ClientSessionCache.Get(cacheKey)
@@ -1813,11 +1824,14 @@ func (c *Conn) ConnectionState() ConnectionState {
 		state.VerifiedChains = c.verifiedChains
 		state.ServerName = c.serverName
 		state.ChannelID = c.channelID
+		state.TokenBindingNegotiated = c.tokenBindingNegotiated
+		state.TokenBindingParam = c.tokenBindingParam
 		state.SRTPProtectionProfile = c.srtpProtectionProfile
 		state.TLSUnique = c.firstFinished[:]
 		state.SCTList = c.sctList
 		state.PeerSignatureAlgorithm = c.peerSignatureAlgorithm
 		state.CurveID = c.curveID
+		state.QUICTransportParams = c.quicTransportParams
 	}
 
 	return state
@@ -1847,6 +1861,20 @@ func (c *Conn) VerifyHostname(host string) error {
 	return c.peerCertificates[0].VerifyHostname(host)
 }
 
+func (c *Conn) exportKeyingMaterialTLS13(length int, secret, label, context []byte) []byte {
+	cipherSuite := c.cipherSuite
+	if cipherSuite == nil {
+		cipherSuite = c.earlyCipherSuite
+	}
+	hash := cipherSuite.hash()
+	exporterKeyingLabel := []byte("exporter")
+	contextHash := hash.New()
+	contextHash.Write(context)
+	exporterContext := hash.New().Sum(nil)
+	derivedSecret := hkdfExpandLabel(cipherSuite.hash(), secret, label, exporterContext, hash.Size())
+	return hkdfExpandLabel(cipherSuite.hash(), derivedSecret, exporterKeyingLabel, contextHash.Sum(nil), length)
+}
+
 // ExportKeyingMaterial exports keying material from the current connection
 // state, as per RFC 5705.
 func (c *Conn) ExportKeyingMaterial(length int, label, context []byte, useContext bool) ([]byte, error) {
@@ -1857,16 +1885,7 @@ func (c *Conn) ExportKeyingMaterial(length int, label, context []byte, useContex
 	}
 
 	if c.vers >= VersionTLS13 {
-		if isDraft21(c.wireVersion) {
-			hash := c.cipherSuite.hash()
-			exporterKeyingLabel := []byte("exporter")
-			contextHash := hash.New()
-			contextHash.Write(context)
-			exporterContext := hash.New().Sum(nil)
-			derivedSecret := hkdfExpandLabel(c.cipherSuite.hash(), c.wireVersion, c.exporterSecret, label, exporterContext, hash.Size())
-			return hkdfExpandLabel(c.cipherSuite.hash(), c.wireVersion, derivedSecret, exporterKeyingLabel, contextHash.Sum(nil), length), nil
-		}
-		return hkdfExpandLabel(c.cipherSuite.hash(), c.wireVersion, c.exporterSecret, label, context, length), nil
+		return c.exportKeyingMaterialTLS13(length, c.exporterSecret, label, context), nil
 	}
 
 	seedLen := len(c.clientRandom) + len(c.serverRandom)
@@ -1883,6 +1902,18 @@ func (c *Conn) ExportKeyingMaterial(length int, label, context []byte, useContex
 	result := make([]byte, length)
 	prfForVersion(c.vers, c.cipherSuite)(result, c.exporterSecret, label, seed)
 	return result, nil
+}
+
+func (c *Conn) ExportEarlyKeyingMaterial(length int, label, context []byte) ([]byte, error) {
+	if c.vers < VersionTLS13 {
+		return nil, errors.New("tls: early exporters not defined before TLS 1.3")
+	}
+
+	if c.earlyExporterSecret == nil {
+		return nil, errors.New("tls: no early exporter secret")
+	}
+
+	return c.exportKeyingMaterialTLS13(length, c.earlyExporterSecret, label, context), nil
 }
 
 // noRenegotiationInfo returns true if the renegotiation info extension
@@ -1926,11 +1957,8 @@ func (c *Conn) SendNewSessionTicket(nonce []byte) error {
 		duplicateEarlyDataExtension: c.config.Bugs.DuplicateTicketEarlyData,
 		customExtension:             c.config.Bugs.CustomTicketExtension,
 		ticketAgeAdd:                ticketAgeAdd,
+		ticketNonce:                 nonce,
 		maxEarlyDataSize:            c.config.MaxEarlyDataSize,
-	}
-
-	if isDraft21(c.wireVersion) {
-		m.ticketNonce = nonce
 	}
 
 	if c.config.Bugs.SendTicketLifetime != 0 {
@@ -1940,16 +1968,12 @@ func (c *Conn) SendNewSessionTicket(nonce []byte) error {
 	state := sessionState{
 		vers:               c.vers,
 		cipherSuite:        c.cipherSuite.id,
-		masterSecret:       c.resumptionSecret,
+		masterSecret:       deriveSessionPSK(c.cipherSuite, c.wireVersion, c.resumptionSecret, nonce),
 		certificates:       peerCertificatesRaw,
 		ticketCreationTime: c.config.time(),
 		ticketExpiration:   c.config.time().Add(time.Duration(m.ticketLifetime) * time.Second),
 		ticketAgeAdd:       uint32(addBuffer[3])<<24 | uint32(addBuffer[2])<<16 | uint32(addBuffer[1])<<8 | uint32(addBuffer[0]),
 		earlyALPN:          []byte(c.clientProtocol),
-	}
-
-	if isDraft21(c.wireVersion) {
-		state.masterSecret = deriveSessionPSK(c.cipherSuite, c.wireVersion, c.resumptionSecret, nonce)
 	}
 
 	if !c.config.Bugs.SendEmptySessionTicket {
@@ -1995,11 +2019,7 @@ func (c *Conn) sendFakeEarlyData(len int) error {
 	payload := make([]byte, 5+len)
 	payload[0] = byte(recordTypeApplicationData)
 	payload[1] = 3
-	payload[2] = 1
-	if isResumptionRecordVersionVariant(c.config.TLS13Variant) {
-		payload[1] = 3
-		payload[2] = 3
-	}
+	payload[2] = 3
 	payload[3] = byte(len >> 8)
 	payload[4] = byte(len)
 	_, err := c.conn.Write(payload)

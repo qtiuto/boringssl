@@ -186,15 +186,11 @@ static UniquePtr<CRYPTO_BUFFER> x509_to_buffer(X509 *x509) {
 }
 
 // new_leafless_chain returns a fresh stack of buffers set to {NULL}.
-static STACK_OF(CRYPTO_BUFFER) *new_leafless_chain(void) {
-  STACK_OF(CRYPTO_BUFFER) *chain = sk_CRYPTO_BUFFER_new_null();
-  if (chain == NULL) {
-    return NULL;
-  }
-
-  if (!sk_CRYPTO_BUFFER_push(chain, NULL)) {
-    sk_CRYPTO_BUFFER_free(chain);
-    return NULL;
+static UniquePtr<STACK_OF(CRYPTO_BUFFER)> new_leafless_chain(void) {
+  UniquePtr<STACK_OF(CRYPTO_BUFFER)> chain(sk_CRYPTO_BUFFER_new_null());
+  if (!chain ||
+      !sk_CRYPTO_BUFFER_push(chain.get(), nullptr)) {
+    return nullptr;
   }
 
   return chain;
@@ -207,25 +203,25 @@ static STACK_OF(CRYPTO_BUFFER) *new_leafless_chain(void) {
 static int ssl_cert_set_chain(CERT *cert, STACK_OF(X509) *chain) {
   UniquePtr<STACK_OF(CRYPTO_BUFFER)> new_chain;
 
-  if (cert->chain != NULL) {
+  if (cert->chain != nullptr) {
     new_chain.reset(sk_CRYPTO_BUFFER_new_null());
     if (!new_chain) {
       return 0;
     }
 
-    CRYPTO_BUFFER *leaf = sk_CRYPTO_BUFFER_value(cert->chain, 0);
+    CRYPTO_BUFFER *leaf = sk_CRYPTO_BUFFER_value(cert->chain.get(), 0);
     if (!sk_CRYPTO_BUFFER_push(new_chain.get(), leaf)) {
       return 0;
     }
     // |leaf| might be NULL if it's a “leafless” chain.
-    if (leaf != NULL) {
+    if (leaf != nullptr) {
       CRYPTO_BUFFER_up_ref(leaf);
     }
   }
 
   for (X509 *x509 : chain) {
     if (!new_chain) {
-      new_chain.reset(new_leafless_chain());
+      new_chain = new_leafless_chain();
       if (!new_chain) {
         return 0;
       }
@@ -238,9 +234,7 @@ static int ssl_cert_set_chain(CERT *cert, STACK_OF(X509) *chain) {
     }
   }
 
-  sk_CRYPTO_BUFFER_pop_free(cert->chain, CRYPTO_BUFFER_free);
-  cert->chain = new_chain.release();
-
+  cert->chain = std::move(new_chain);
   return 1;
 }
 
@@ -354,66 +348,6 @@ static void ssl_crypto_x509_session_clear(SSL_SESSION *session) {
   session->x509_chain_without_leaf = NULL;
 }
 
-static int ssl_verify_alarm_type(long type) {
-  switch (type) {
-    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT:
-    case X509_V_ERR_UNABLE_TO_GET_CRL:
-    case X509_V_ERR_UNABLE_TO_GET_CRL_ISSUER:
-      return SSL_AD_UNKNOWN_CA;
-
-    case X509_V_ERR_UNABLE_TO_DECRYPT_CERT_SIGNATURE:
-    case X509_V_ERR_UNABLE_TO_DECRYPT_CRL_SIGNATURE:
-    case X509_V_ERR_UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY:
-    case X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD:
-    case X509_V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD:
-    case X509_V_ERR_ERROR_IN_CRL_LAST_UPDATE_FIELD:
-    case X509_V_ERR_ERROR_IN_CRL_NEXT_UPDATE_FIELD:
-    case X509_V_ERR_CERT_NOT_YET_VALID:
-    case X509_V_ERR_CRL_NOT_YET_VALID:
-    case X509_V_ERR_CERT_UNTRUSTED:
-    case X509_V_ERR_CERT_REJECTED:
-    case X509_V_ERR_HOSTNAME_MISMATCH:
-    case X509_V_ERR_EMAIL_MISMATCH:
-    case X509_V_ERR_IP_ADDRESS_MISMATCH:
-      return SSL_AD_BAD_CERTIFICATE;
-
-    case X509_V_ERR_CERT_SIGNATURE_FAILURE:
-    case X509_V_ERR_CRL_SIGNATURE_FAILURE:
-      return SSL_AD_DECRYPT_ERROR;
-
-    case X509_V_ERR_CERT_HAS_EXPIRED:
-    case X509_V_ERR_CRL_HAS_EXPIRED:
-      return SSL_AD_CERTIFICATE_EXPIRED;
-
-    case X509_V_ERR_CERT_REVOKED:
-      return SSL_AD_CERTIFICATE_REVOKED;
-
-    case X509_V_ERR_UNSPECIFIED:
-    case X509_V_ERR_OUT_OF_MEM:
-    case X509_V_ERR_INVALID_CALL:
-    case X509_V_ERR_STORE_LOOKUP:
-      return SSL_AD_INTERNAL_ERROR;
-
-    case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT:
-    case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN:
-    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY:
-    case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE:
-    case X509_V_ERR_CERT_CHAIN_TOO_LONG:
-    case X509_V_ERR_PATH_LENGTH_EXCEEDED:
-    case X509_V_ERR_INVALID_CA:
-      return SSL_AD_UNKNOWN_CA;
-
-    case X509_V_ERR_APPLICATION_VERIFICATION:
-      return SSL_AD_HANDSHAKE_FAILURE;
-
-    case X509_V_ERR_INVALID_PURPOSE:
-      return SSL_AD_UNSUPPORTED_CERTIFICATE;
-
-    default:
-      return SSL_AD_CERTIFICATE_UNKNOWN;
-  }
-}
-
 static int ssl_crypto_x509_session_verify_cert_chain(SSL_SESSION *session,
                                                      SSL *ssl,
                                                      uint8_t *out_alert) {
@@ -464,7 +398,7 @@ static int ssl_crypto_x509_session_verify_cert_chain(SSL_SESSION *session,
 
   // If |SSL_VERIFY_NONE|, the error is non-fatal, but we keep the result.
   if (verify_ret <= 0 && ssl->verify_mode != SSL_VERIFY_NONE) {
-    *out_alert = ssl_verify_alarm_type(ctx->error);
+    *out_alert = SSL_alert_from_verify_result(ctx->error);
     return 0;
   }
 
@@ -501,13 +435,13 @@ static int ssl_crypto_x509_ssl_auto_chain_if_needed(SSL *ssl) {
   // isn't disabled.
   if ((ssl->mode & SSL_MODE_NO_AUTO_CHAIN) ||
       !ssl_has_certificate(ssl) ||
-      ssl->cert->chain == NULL ||
-      sk_CRYPTO_BUFFER_num(ssl->cert->chain) > 1) {
+      ssl->cert->chain == nullptr ||
+      sk_CRYPTO_BUFFER_num(ssl->cert->chain.get()) > 1) {
     return 1;
   }
 
-  UniquePtr<X509> leaf(
-      X509_parse_from_buffer(sk_CRYPTO_BUFFER_value(ssl->cert->chain, 0)));
+  UniquePtr<X509> leaf(X509_parse_from_buffer(
+      sk_CRYPTO_BUFFER_value(ssl->cert->chain.get(), 0)));
   if (!leaf) {
     OPENSSL_PUT_ERROR(SSL, ERR_R_X509_LIB);
     return 0;
@@ -810,7 +744,7 @@ static int ssl_cert_cache_leaf_cert(CERT *cert) {
     return 1;
   }
 
-  CRYPTO_BUFFER *leaf = sk_CRYPTO_BUFFER_value(cert->chain, 0);
+  CRYPTO_BUFFER *leaf = sk_CRYPTO_BUFFER_value(cert->chain.get(), 0);
   if (!leaf) {
     return 1;
   }
@@ -867,14 +801,13 @@ static int ssl_cert_append_cert(CERT *cert, X509 *x509) {
   }
 
   if (cert->chain != NULL) {
-    return PushToStack(cert->chain, std::move(buffer));
+    return PushToStack(cert->chain.get(), std::move(buffer));
   }
 
   cert->chain = new_leafless_chain();
-  if (cert->chain == NULL ||
-      !PushToStack(cert->chain, std::move(buffer))) {
-    sk_CRYPTO_BUFFER_free(cert->chain);
-    cert->chain = NULL;
+  if (!cert->chain ||
+      !PushToStack(cert->chain.get(), std::move(buffer))) {
+    cert->chain.reset();
     return 0;
   }
 
@@ -966,9 +899,9 @@ int SSL_clear_chain_certs(SSL *ssl) {
 static int ssl_cert_cache_chain_certs(CERT *cert) {
   assert(cert->x509_method);
 
-  if (cert->x509_chain != NULL ||
-      cert->chain == NULL ||
-      sk_CRYPTO_BUFFER_num(cert->chain) < 2) {
+  if (cert->x509_chain != nullptr ||
+      cert->chain == nullptr ||
+      sk_CRYPTO_BUFFER_num(cert->chain.get()) < 2) {
     return 1;
   }
 
@@ -977,8 +910,8 @@ static int ssl_cert_cache_chain_certs(CERT *cert) {
     return 0;
   }
 
-  for (size_t i = 1; i < sk_CRYPTO_BUFFER_num(cert->chain); i++) {
-    CRYPTO_BUFFER *buffer = sk_CRYPTO_BUFFER_value(cert->chain, i);
+  for (size_t i = 1; i < sk_CRYPTO_BUFFER_num(cert->chain.get()); i++) {
+    CRYPTO_BUFFER *buffer = sk_CRYPTO_BUFFER_value(cert->chain.get(), i);
     UniquePtr<X509> x509(X509_parse_from_buffer(buffer));
     if (!x509 ||
         !PushToStack(chain.get(), std::move(x509))) {
@@ -1296,4 +1229,62 @@ int SSL_set0_verify_cert_store(SSL *ssl, X509_STORE *store) {
 int SSL_set1_verify_cert_store(SSL *ssl, X509_STORE *store) {
   check_ssl_x509_method(ssl);
   return set_cert_store(&ssl->cert->verify_store, store, 1);
+}
+
+int SSL_alert_from_verify_result(long result) {
+  switch (result) {
+    case X509_V_ERR_CERT_CHAIN_TOO_LONG:
+    case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT:
+    case X509_V_ERR_INVALID_CA:
+    case X509_V_ERR_PATH_LENGTH_EXCEEDED:
+    case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN:
+    case X509_V_ERR_UNABLE_TO_GET_CRL:
+    case X509_V_ERR_UNABLE_TO_GET_CRL_ISSUER:
+    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT:
+    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY:
+    case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE:
+      return SSL_AD_UNKNOWN_CA;
+
+    case X509_V_ERR_UNABLE_TO_DECRYPT_CERT_SIGNATURE:
+    case X509_V_ERR_UNABLE_TO_DECRYPT_CRL_SIGNATURE:
+    case X509_V_ERR_UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY:
+    case X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD:
+    case X509_V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD:
+    case X509_V_ERR_ERROR_IN_CRL_LAST_UPDATE_FIELD:
+    case X509_V_ERR_ERROR_IN_CRL_NEXT_UPDATE_FIELD:
+    case X509_V_ERR_CERT_UNTRUSTED:
+    case X509_V_ERR_CERT_REJECTED:
+    case X509_V_ERR_HOSTNAME_MISMATCH:
+    case X509_V_ERR_EMAIL_MISMATCH:
+    case X509_V_ERR_IP_ADDRESS_MISMATCH:
+      return SSL_AD_BAD_CERTIFICATE;
+
+    case X509_V_ERR_CERT_SIGNATURE_FAILURE:
+    case X509_V_ERR_CRL_SIGNATURE_FAILURE:
+      return SSL_AD_DECRYPT_ERROR;
+
+    case X509_V_ERR_CERT_HAS_EXPIRED:
+    case X509_V_ERR_CERT_NOT_YET_VALID:
+    case X509_V_ERR_CRL_HAS_EXPIRED:
+    case X509_V_ERR_CRL_NOT_YET_VALID:
+      return SSL_AD_CERTIFICATE_EXPIRED;
+
+    case X509_V_ERR_CERT_REVOKED:
+      return SSL_AD_CERTIFICATE_REVOKED;
+
+    case X509_V_ERR_UNSPECIFIED:
+    case X509_V_ERR_OUT_OF_MEM:
+    case X509_V_ERR_INVALID_CALL:
+    case X509_V_ERR_STORE_LOOKUP:
+      return SSL_AD_INTERNAL_ERROR;
+
+    case X509_V_ERR_APPLICATION_VERIFICATION:
+      return SSL_AD_HANDSHAKE_FAILURE;
+
+    case X509_V_ERR_INVALID_PURPOSE:
+      return SSL_AD_UNSUPPORTED_CERTIFICATE;
+
+    default:
+      return SSL_AD_CERTIFICATE_UNKNOWN;
+  }
 }

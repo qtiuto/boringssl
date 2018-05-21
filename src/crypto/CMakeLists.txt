@@ -53,7 +53,7 @@ if(NOT OPENSSL_NO_ASM)
       set(PERLASM_STYLE win32n)
       set(PERLASM_FLAGS "-DOPENSSL_IA32_SSE2")
     endif()
-    set(CMAKE_ASM_NASM_FLAGS "-g cv8")
+    set(CMAKE_ASM_NASM_FLAGS "-gcv8")
 
     # On Windows, we use the NASM output, specifically built with Yasm.
     set(ASM_EXT asm)
@@ -134,6 +134,7 @@ add_library(
 
   OBJECT
 
+  cpu-aarch64-fuchsia.c
   cpu-aarch64-linux.c
   cpu-arm.c
   cpu-arm-linux.c
@@ -260,6 +261,7 @@ add_executable(
   pool/pool_test.cc
   refcount_test.cc
   rsa_extra/rsa_test.cc
+  self_test.cc
   test/file_test_gtest.cc
   thread_test.cc
   x509/x509_test.cc
@@ -267,11 +269,11 @@ add_executable(
   x509v3/v3name_test.cc
 
   $<TARGET_OBJECTS:crypto_test_data>
-  $<TARGET_OBJECTS:gtest_main>
+  $<TARGET_OBJECTS:boringssl_gtest_main>
   $<TARGET_OBJECTS:test_support>
 )
 
-target_link_libraries(crypto_test crypto gtest)
+target_link_libraries(crypto_test crypto boringssl_gtest)
 if (WIN32)
   target_link_libraries(crypto_test ws2_32)
 endif()

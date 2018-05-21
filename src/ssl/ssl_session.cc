@@ -682,17 +682,10 @@ static enum ssl_hs_wait_t ssl_lookup_session(
   }
 
   // Fall back to the external cache, if it exists.
-  if (!session && (ssl->session_ctx->get_session_cb != nullptr ||
-                   ssl->session_ctx->get_session_cb_legacy != nullptr)) {
+  if (!session && ssl->session_ctx->get_session_cb != nullptr) {
     int copy = 1;
-    if (ssl->session_ctx->get_session_cb != nullptr) {
-      session.reset(ssl->session_ctx->get_session_cb(ssl, session_id,
-                                                     session_id_len, &copy));
-    } else {
-      session.reset(ssl->session_ctx->get_session_cb_legacy(
-          ssl, const_cast<uint8_t *>(session_id), session_id_len, &copy));
-    }
-
+    session.reset(ssl->session_ctx->get_session_cb(ssl, session_id,
+                                                   session_id_len, &copy));
     if (!session) {
       return ssl_hs_ok;
     }
@@ -920,6 +913,11 @@ X509 *SSL_SESSION_get0_peer(const SSL_SESSION *session) {
   return session->x509_peer;
 }
 
+const STACK_OF(CRYPTO_BUFFER) *
+    SSL_SESSION_get0_peer_certificates(const SSL_SESSION *session) {
+  return session->certs;
+}
+
 size_t SSL_SESSION_get_master_key(const SSL_SESSION *session, uint8_t *out,
                                   size_t max_out) {
   // TODO(davidben): Fix master_key_length's type and remove these casts.
@@ -988,6 +986,10 @@ void SSL_SESSION_get0_ticket(const SSL_SESSION *session,
 
 uint32_t SSL_SESSION_get_ticket_lifetime_hint(const SSL_SESSION *session) {
   return session->tlsext_tick_lifetime_hint;
+}
+
+const SSL_CIPHER *SSL_SESSION_get0_cipher(const SSL_SESSION *session) {
+  return session->cipher;
 }
 
 SSL_SESSION *SSL_magic_pending_session_ptr(void) {
@@ -1186,12 +1188,6 @@ void SSL_CTX_sess_set_get_cb(SSL_CTX *ctx,
                              SSL_SESSION *(*cb)(SSL *ssl, const uint8_t *id,
                                                 int id_len, int *out_copy)) {
   ctx->get_session_cb = cb;
-}
-
-void SSL_CTX_sess_set_get_cb(SSL_CTX *ctx,
-                             SSL_SESSION *(*cb)(SSL *ssl, uint8_t *id,
-                                                int id_len, int *out_copy)) {
-  ctx->get_session_cb_legacy = cb;
 }
 
 SSL_SESSION *(*SSL_CTX_sess_get_get_cb(SSL_CTX *ctx))(SSL *ssl,

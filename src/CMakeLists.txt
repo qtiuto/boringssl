@@ -48,17 +48,18 @@ endif()
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CLANG)
   # Note clang-cl is odd and sets both CLANG and MSVC. We base our configuration
-  # primarily on our normal Clang one because the MSVC one is mostly
-  # suppressions for an overaggressive -Wall.
-  set(C_CXX_FLAGS "-Wall -Werror -Wformat=2 -Wsign-compare -Wmissing-field-initializers -Wwrite-strings")
+  # primarily on our normal Clang one.
+  set(C_CXX_FLAGS "-Werror -Wformat=2 -Wsign-compare -Wmissing-field-initializers -Wwrite-strings")
   if(MSVC)
-    # clang-cl sets different default warnings than clang.
-    set(C_CXX_FLAGS "${C_CXX_FLAGS} -Wno-unused-parameter -fmsc-version=1900")
+    # clang-cl sets different default warnings than clang. It also treats -Wall
+    # as -Weverything, to match MSVC. Instead -W3 is the alias for -Wall.
+    # See http://llvm.org/viewvc/llvm-project?view=revision&revision=319116
+    set(C_CXX_FLAGS "${C_CXX_FLAGS} -W3 -Wno-unused-parameter -fmsc-version=1900")
     # googletest suppresses warning C4996 via a pragma, but clang-cl does not
     # honor it. Suppress it here to compensate. See https://crbug.com/772117.
     set(C_CXX_FLAGS "${C_CXX_FLAGS} -Wno-deprecated-declarations")
   else()
-    set(C_CXX_FLAGS "${C_CXX_FLAGS} -ggdb -fvisibility=hidden -fno-common")
+    set(C_CXX_FLAGS "${C_CXX_FLAGS} -Wall -ggdb -fvisibility=hidden -fno-common")
   endif()
 
   if(CLANG)
@@ -67,18 +68,6 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CLANG)
     # GCC (at least 4.8.4) has a bug where it'll find unreachable free() calls
     # and declare that the code is trying to free a stack pointer.
     set(C_CXX_FLAGS "${C_CXX_FLAGS} -Wno-free-nonheap-object")
-  endif()
-
-  if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND
-     NOT "6.0.0" VERSION_GREATER CMAKE_C_COMPILER_VERSION)
-    # Clang's -Wtautological-constant-compare is far too aggressive and does not
-    # account for, say, wanting the same code to work on both 32-bit and 64-bit
-    # platforms.
-    #
-    # Note "Clang" and "AppleClang" version differently, so we check for an
-    # exact match on the COMPILER_ID. As of writing, the warning is not in any
-    # release of AppleClang yet.
-    set(C_CXX_FLAGS "${C_CXX_FLAGS} -Wno-tautological-constant-compare -Wtautological-constant-out-of-range-compare")
   endif()
 
   if(CLANG OR NOT "7.0.0" VERSION_GREATER CMAKE_C_COMPILER_VERSION)
@@ -171,8 +160,8 @@ elseif(MSVC)
                             ${MSVC_DISABLED_WARNINGS_LIST})
   string(REPLACE "C" " -w4" MSVC_LEVEL4_WARNINGS_STR
                             ${MSVC_LEVEL4_WARNINGS_LIST})
-  set(CMAKE_C_FLAGS   "-Wall -WX ${MSVC_DISABLED_WARNINGS_STR} ${MSVC_LEVEL4_WARNINGS_STR}")
-  set(CMAKE_CXX_FLAGS "-Wall -WX ${MSVC_DISABLED_WARNINGS_STR} ${MSVC_LEVEL4_WARNINGS_STR}")
+  set(CMAKE_C_FLAGS   "-utf-8 -Wall -WX ${MSVC_DISABLED_WARNINGS_STR} ${MSVC_LEVEL4_WARNINGS_STR}")
+  set(CMAKE_CXX_FLAGS "-utf-8 -Wall -WX ${MSVC_DISABLED_WARNINGS_STR} ${MSVC_LEVEL4_WARNINGS_STR}")
 endif()
 
 if(WIN32)
@@ -290,6 +279,10 @@ if(FIPS)
   endif()
 endif()
 
+if(OPENSSL_SMALL)
+  add_definitions(-DOPENSSL_SMALL)
+endif()
+
 # CMake's iOS support uses Apple's multiple-architecture toolchain. It takes an
 # architecture list from CMAKE_OSX_ARCHITECTURES, leaves CMAKE_SYSTEM_PROCESSOR
 # alone, and expects all architecture-specific logic to be conditioned within
@@ -339,11 +332,11 @@ else()
   message(FATAL_ERROR "Unknown processor:" ${CMAKE_SYSTEM_PROCESSOR})
 endif()
 
-if (ANDROID AND ${ARCH} STREQUAL "arm")
-  # The Android-NDK CMake files somehow fail to set the -march flag for
-  # assembly files. Without this flag, the compiler believes that it's
+if (ANDROID AND NOT ANDROID_NDK_REVISION AND ${ARCH} STREQUAL "arm")
+  # The third-party Android-NDK CMake files somehow fail to set the -march flag
+  # for assembly files. Without this flag, the compiler believes that it's
   # building for ARMv5.
-  set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -march=${CMAKE_SYSTEM_PROCESSOR}")
+  set(CMAKE_ASM_FLAGS "-march=${CMAKE_SYSTEM_PROCESSOR} ${CMAKE_ASM_FLAGS}")
 endif()
 
 if (${ARCH} STREQUAL "x86" AND APPLE AND ${CMAKE_VERSION} VERSION_LESS "3.0")
@@ -355,8 +348,8 @@ endif()
 
 # Add minimal googletest targets. The provided one has many side-effects, and
 # googletest has a very straightforward build.
-add_library(gtest third_party/googletest/src/gtest-all.cc)
-target_include_directories(gtest PRIVATE third_party/googletest)
+add_library(boringssl_gtest third_party/googletest/src/gtest-all.cc)
+target_include_directories(boringssl_gtest PRIVATE third_party/googletest)
 
 include_directories(third_party/googletest/include)
 

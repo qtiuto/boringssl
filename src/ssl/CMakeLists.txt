@@ -11,6 +11,7 @@ add_library(
   d1_srtp.cc
   dtls_method.cc
   dtls_record.cc
+  handoff.cc
   handshake.cc
   handshake_client.cc
   handshake_server.cc
@@ -49,11 +50,11 @@ add_executable(
   span_test.cc
   ssl_test.cc
 
-  $<TARGET_OBJECTS:gtest_main>
+  $<TARGET_OBJECTS:boringssl_gtest_main>
   $<TARGET_OBJECTS:test_support>
 )
 
-target_link_libraries(ssl_test ssl crypto gtest)
+target_link_libraries(ssl_test ssl crypto boringssl_gtest)
 if (WIN32)
   target_link_libraries(ssl_test ws2_32)
 endif()

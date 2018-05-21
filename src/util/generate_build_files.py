@@ -44,12 +44,6 @@ NON_PERL_FILES = {
         'src/crypto/curve25519/asm/x25519-asm-arm.S',
         'src/crypto/poly1305/poly1305_arm_asm.S',
     ],
-    ('linux', 'x86_64'): [
-        'src/crypto/curve25519/asm/x25519-asm-x86_64.S',
-    ],
-    ('mac', 'x86_64'): [
-        'src/crypto/curve25519/asm/x25519-asm-x86_64.S',
-    ],
 }
 
 PREFIX = None
@@ -300,11 +294,13 @@ class GN(object):
       out.write(self.header)
 
       self.PrintVariableSection(out, 'crypto_sources',
-                                files['crypto'] + files['crypto_headers'] +
+                                files['crypto'] +
                                 files['crypto_internal_headers'])
+      self.PrintVariableSection(out, 'crypto_headers',
+                                files['crypto_headers'])
       self.PrintVariableSection(out, 'ssl_sources',
-                                files['ssl'] + files['ssl_headers'] +
-                                files['ssl_internal_headers'])
+                                files['ssl'] + files['ssl_internal_headers'])
+      self.PrintVariableSection(out, 'ssl_headers', files['ssl_headers'])
 
       for ((osname, arch), asm_files) in asm_outputs:
         self.PrintVariableSection(
@@ -593,6 +589,12 @@ def main(platforms):
   ssl_source_files = FindCFiles(os.path.join('src', 'ssl'), NoTests)
   tool_c_files = FindCFiles(os.path.join('src', 'tool'), NoTests)
   tool_h_files = FindHeaderFiles(os.path.join('src', 'tool'), AllFiles)
+
+  # third_party/fiat/p256.c lives in third_party/fiat, but it is a FIPS
+  # fragment, not a normal source file.
+  p256 = os.path.join('src', 'third_party', 'fiat', 'p256.c')
+  fips_fragments.append(p256)
+  crypto_c_files.remove(p256)
 
   # Generate err_data.c
   with open('err_data.c', 'w+') as err_data:

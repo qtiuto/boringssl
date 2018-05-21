@@ -4,21 +4,21 @@
  * This package is an SSL implementation written
  * by Eric Young (eay@cryptsoft.com).
  * The implementation was written so as to conform with Netscapes SSL.
- * 
+ *
  * This library is free for commercial and non-commercial use as long as
  * the following conditions are aheared to.  The following conditions
  * apply to all code found in this distribution, be it the RC4, RSA,
  * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
  * included with this distribution is covered by the same copyright terms
  * except that the holder is Tim Hudson (tjh@cryptsoft.com).
- * 
+ *
  * Copyright remains Eric Young's, and as such any Copyright notices in
  * the code are not to be removed.
  * If this package is used in a product, Eric Young should be given attribution
  * as the author of the parts of the library used.
  * This can be in the form of a textual message at program startup or
  * in documentation (online or textual) provided with the package.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
@@ -33,10 +33,10 @@
  *     Eric Young (eay@cryptsoft.com)"
  *    The word 'cryptographic' can be left out if the rouines from the library
  *    being used are not cryptographic related :-).
- * 4. If you include any Windows specific code (or a derivative thereof) from 
+ * 4. If you include any Windows specific code (or a derivative thereof) from
  *    the apps directory (application code) you must include an acknowledgement:
  *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -48,7 +48,7 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- * 
+ *
  * The licence and distribution terms for any publically available version or
  * derivative of this code cannot be changed.  i.e. this code cannot simply be
  * copied and put under another distribution licence
@@ -62,7 +62,7 @@
  * are met:
  *
  * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *    notice, this list of conditions and the following disclaimer.
  *
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in
@@ -109,7 +109,7 @@
  */
 /* ====================================================================
  * Copyright 2002 Sun Microsystems, Inc. ALL RIGHTS RESERVED.
- * ECC cipher suite support in OpenSSL originally developed by 
+ * ECC cipher suite support in OpenSSL originally developed by
  * SUN MICROSYSTEMS, INC., and contributed to the OpenSSL project.
  */
 /* ====================================================================
@@ -811,9 +811,14 @@ static void ll_append_head(CIPHER_ORDER **head, CIPHER_ORDER *curr,
   *head = curr;
 }
 
-static void ssl_cipher_collect_ciphers(CIPHER_ORDER *co_list,
-                                       CIPHER_ORDER **head_p,
-                                       CIPHER_ORDER **tail_p) {
+static bool ssl_cipher_collect_ciphers(Array<CIPHER_ORDER> *out_co_list,
+                                       CIPHER_ORDER **out_head,
+                                       CIPHER_ORDER **out_tail) {
+  Array<CIPHER_ORDER> co_list;
+  if (!co_list.Init(kCiphersLen)) {
+    return false;
+  }
+
   size_t co_list_num = 0;
   for (const SSL_CIPHER &cipher : kCiphers) {
     // TLS 1.3 ciphers do not participate in this mechanism.
@@ -844,9 +849,35 @@ static void ssl_cipher_collect_ciphers(CIPHER_ORDER *co_list,
 
     co_list[co_list_num - 1].next = NULL;
 
-    *head_p = &co_list[0];
-    *tail_p = &co_list[co_list_num - 1];
+    *out_head = &co_list[0];
+    *out_tail = &co_list[co_list_num - 1];
+  } else {
+    *out_head = nullptr;
+    *out_tail = nullptr;
   }
+  *out_co_list = std::move(co_list);
+  return true;
+}
+
+SSLCipherPreferenceList::~SSLCipherPreferenceList() {
+  OPENSSL_free(in_group_flags);
+}
+
+bool SSLCipherPreferenceList::Init(UniquePtr<STACK_OF(SSL_CIPHER)> ciphers_arg,
+                                   Span<const bool> in_group_flags_arg) {
+  if (sk_SSL_CIPHER_num(ciphers_arg.get()) != in_group_flags_arg.size()) {
+    OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
+    return false;
+  }
+
+  Array<bool> copy;
+  if (!copy.CopyFrom(in_group_flags_arg)) {
+    return false;
+  }
+  ciphers = std::move(ciphers_arg);
+  size_t unused_len;
+  copy.Release(&in_group_flags, &unused_len);
+  return true;
 }
 
 // ssl_cipher_apply_rule applies the rule type |rule| to ciphers matching its
@@ -1201,15 +1232,8 @@ static bool ssl_cipher_process_rulestr(const char *rule_str,
   return true;
 }
 
-bool ssl_create_cipher_list(
-    struct ssl_cipher_preference_list_st **out_cipher_list,
-    const char *rule_str, bool strict) {
-  STACK_OF(SSL_CIPHER) *cipherstack = NULL;
-  CIPHER_ORDER *co_list = NULL, *head = NULL, *tail = NULL, *curr;
-  uint8_t *in_group_flags = NULL;
-  unsigned int num_in_group_flags = 0;
-  struct ssl_cipher_preference_list_st *pref_list = NULL;
-
+bool ssl_create_cipher_list(SSLCipherPreferenceList **out_cipher_list,
+                            const char *rule_str, bool strict) {
   // Return with error if nothing to do.
   if (rule_str == NULL || out_cipher_list == NULL) {
     return false;
@@ -1218,13 +1242,11 @@ bool ssl_create_cipher_list(
   // Now we have to collect the available ciphers from the compiled in ciphers.
   // We cannot get more than the number compiled in, so it is used for
   // allocation.
-  co_list = (CIPHER_ORDER *)OPENSSL_malloc(sizeof(CIPHER_ORDER) * kCiphersLen);
-  if (co_list == NULL) {
-    OPENSSL_PUT_ERROR(SSL, ERR_R_MALLOC_FAILURE);
+  Array<CIPHER_ORDER> co_list;
+  CIPHER_ORDER *head = nullptr, *tail = nullptr;
+  if (!ssl_cipher_collect_ciphers(&co_list, &head, &tail)) {
     return false;
   }
-
-  ssl_cipher_collect_ciphers(co_list, &head, &tail);
 
   // Now arrange all ciphers by preference:
   // TODO(davidben): Compute this order once and copy it.
@@ -1285,7 +1307,7 @@ bool ssl_create_cipher_list(
   if (strncmp(rule_str, "DEFAULT", 7) == 0) {
     if (!ssl_cipher_process_rulestr(SSL_DEFAULT_CIPHER_LIST, &head, &tail,
                                     strict)) {
-      goto err;
+      return false;
     }
     rule_p += 7;
     if (*rule_p == ':') {
@@ -1295,75 +1317,52 @@ bool ssl_create_cipher_list(
 
   if (*rule_p != '\0' &&
       !ssl_cipher_process_rulestr(rule_p, &head, &tail, strict)) {
-    goto err;
+    return false;
   }
 
   // Allocate new "cipherstack" for the result, return with error
   // if we cannot get one.
-  cipherstack = sk_SSL_CIPHER_new_null();
-  if (cipherstack == NULL) {
-    goto err;
-  }
-
-  in_group_flags = (uint8_t *)OPENSSL_malloc(kCiphersLen);
-  if (!in_group_flags) {
-    goto err;
+  UniquePtr<STACK_OF(SSL_CIPHER)> cipherstack(sk_SSL_CIPHER_new_null());
+  Array<bool> in_group_flags;
+  if (cipherstack == nullptr ||
+      !in_group_flags.Init(kCiphersLen)) {
+    return false;
   }
 
   // The cipher selection for the list is done. The ciphers are added
   // to the resulting precedence to the STACK_OF(SSL_CIPHER).
-  for (curr = head; curr != NULL; curr = curr->next) {
+  size_t num_in_group_flags = 0;
+  for (CIPHER_ORDER *curr = head; curr != NULL; curr = curr->next) {
     if (curr->active) {
-      if (!sk_SSL_CIPHER_push(cipherstack, curr->cipher)) {
-        goto err;
+      if (!sk_SSL_CIPHER_push(cipherstack.get(), curr->cipher)) {
+        return false;
       }
       in_group_flags[num_in_group_flags++] = curr->in_group;
     }
   }
-  OPENSSL_free(co_list);  // Not needed any longer
-  co_list = NULL;
 
-  pref_list = (ssl_cipher_preference_list_st *)OPENSSL_malloc(
-      sizeof(struct ssl_cipher_preference_list_st));
-  if (!pref_list) {
-    goto err;
+  UniquePtr<SSLCipherPreferenceList> pref_list =
+      MakeUnique<SSLCipherPreferenceList>();
+  if (!pref_list ||
+      !pref_list->Init(
+          std::move(cipherstack),
+          MakeConstSpan(in_group_flags).subspan(0, num_in_group_flags))) {
+    return false;
   }
-  pref_list->ciphers = cipherstack;
-  pref_list->in_group_flags = NULL;
-  if (num_in_group_flags) {
-    pref_list->in_group_flags = (uint8_t *)OPENSSL_malloc(num_in_group_flags);
-    if (!pref_list->in_group_flags) {
-      goto err;
-    }
-    OPENSSL_memcpy(pref_list->in_group_flags, in_group_flags,
-                   num_in_group_flags);
+
+  if (*out_cipher_list) {
+    Delete(*out_cipher_list);
   }
-  OPENSSL_free(in_group_flags);
-  in_group_flags = NULL;
-  if (*out_cipher_list != NULL) {
-    ssl_cipher_preference_list_free(*out_cipher_list);
-  }
-  *out_cipher_list = pref_list;
-  pref_list = NULL;
+  *out_cipher_list = pref_list.release();
 
   // Configuring an empty cipher list is an error but still updates the
   // output.
-  if (sk_SSL_CIPHER_num((*out_cipher_list)->ciphers) == 0) {
+  if (sk_SSL_CIPHER_num((*out_cipher_list)->ciphers.get()) == 0) {
     OPENSSL_PUT_ERROR(SSL, SSL_R_NO_CIPHER_MATCH);
     return false;
   }
 
   return true;
-
-err:
-  OPENSSL_free(co_list);
-  OPENSSL_free(in_group_flags);
-  sk_SSL_CIPHER_free(cipherstack);
-  if (pref_list) {
-    OPENSSL_free(pref_list->in_group_flags);
-  }
-  OPENSSL_free(pref_list);
-  return false;
 }
 
 uint16_t ssl_cipher_get_value(const SSL_CIPHER *cipher) {
@@ -1773,5 +1772,9 @@ STACK_OF(SSL_COMP) *SSL_COMP_get_compression_methods(void) { return NULL; }
 int SSL_COMP_add_compression_method(int id, COMP_METHOD *cm) { return 1; }
 
 const char *SSL_COMP_get_name(const COMP_METHOD *comp) { return NULL; }
+
+const char *SSL_COMP_get0_name(const SSL_COMP *comp) { return comp->name; }
+
+int SSL_COMP_get_id(const SSL_COMP *comp) { return comp->id; }
 
 void SSL_COMP_free_compression_methods(void) {}

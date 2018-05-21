@@ -10,6 +10,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -33,30 +34,18 @@ const (
 
 // A draft version of TLS 1.3 that is sent over the wire for the current draft.
 const (
-	tls13DraftVersion       = 0x7f12
-	tls13Draft21Version     = 0x7f15
-	tls13ExperimentVersion  = 0x7e01
-	tls13Experiment2Version = 0x7e02
-	tls13Experiment3Version = 0x7e03
-	tls13Draft22Version     = 0x7f16
+	tls13Draft23Version = 0x7f17
+	tls13Draft28Version = 0x7f1c
 )
 
 const (
-	TLS13Default     = 0
-	TLS13Experiment  = 1
-	TLS13Experiment2 = 2
-	TLS13Experiment3 = 3
-	TLS13Draft21     = 4
-	TLS13Draft22     = 5
+	TLS13Draft23 = 0
+	TLS13Draft28 = 1
 )
 
 var allTLSWireVersions = []uint16{
-	tls13DraftVersion,
-	tls13Draft22Version,
-	tls13Draft21Version,
-	tls13Experiment3Version,
-	tls13Experiment2Version,
-	tls13ExperimentVersion,
+	tls13Draft28Version,
+	tls13Draft23Version,
 	VersionTLS12,
 	VersionTLS11,
 	VersionTLS10,
@@ -131,19 +120,22 @@ const (
 	extensionSignedCertificateTimestamp uint16 = 18
 	extensionPadding                    uint16 = 21
 	extensionExtendedMasterSecret       uint16 = 23
+	extensionTokenBinding               uint16 = 24
+	extensionQUICTransportParams        uint16 = 26
 	extensionSessionTicket              uint16 = 35
-	extensionKeyShare                   uint16 = 40    // draft-ietf-tls-tls13-16
-	extensionPreSharedKey               uint16 = 41    // draft-ietf-tls-tls13-16
-	extensionEarlyData                  uint16 = 42    // draft-ietf-tls-tls13-16
-	extensionSupportedVersions          uint16 = 43    // draft-ietf-tls-tls13-16
-	extensionCookie                     uint16 = 44    // draft-ietf-tls-tls13-16
-	extensionPSKKeyExchangeModes        uint16 = 45    // draft-ietf-tls-tls13-18
-	extensionTicketEarlyDataInfo        uint16 = 46    // draft-ietf-tls-tls13-18
-	extensionCertificateAuthorities     uint16 = 47    // draft-ietf-tls-tls13-21
+	extensionPreSharedKey               uint16 = 41    // draft-ietf-tls-tls13-23
+	extensionEarlyData                  uint16 = 42    // draft-ietf-tls-tls13-23
+	extensionSupportedVersions          uint16 = 43    // draft-ietf-tls-tls13-23
+	extensionCookie                     uint16 = 44    // draft-ietf-tls-tls13-23
+	extensionPSKKeyExchangeModes        uint16 = 45    // draft-ietf-tls-tls13-23
+	extensionCertificateAuthorities     uint16 = 47    // draft-ietf-tls-tls13-23
+	extensionSignatureAlgorithmsCert    uint16 = 50    // draft-ietf-tls-tls13-23
+	extensionKeyShare                   uint16 = 51    // draft-ietf-tls-tls13-23
 	extensionCustom                     uint16 = 1234  // not IANA assigned
 	extensionNextProtoNeg               uint16 = 13172 // not IANA assigned
 	extensionRenegotiationInfo          uint16 = 0xff01
 	extensionChannelID                  uint16 = 30032 // not IANA assigned
+	extensionDummyPQPadding             uint16 = 54537 // not IANA assigned
 )
 
 // TLS signaling cipher suite values
@@ -268,11 +260,14 @@ type ConnectionState struct {
 	PeerCertificates           []*x509.Certificate   // certificate chain presented by remote peer
 	VerifiedChains             [][]*x509.Certificate // verified chains built from PeerCertificates
 	ChannelID                  *ecdsa.PublicKey      // the channel ID for this connection
+	TokenBindingNegotiated     bool                  // whether Token Binding was negotiated
+	TokenBindingParam          uint8                 // the negotiated Token Binding key parameter
 	SRTPProtectionProfile      uint16                // the negotiated DTLS-SRTP protection profile
 	TLSUnique                  []byte                // the tls-unique channel binding
 	SCTList                    []byte                // signed certificate timestamp list
 	PeerSignatureAlgorithm     signatureAlgorithm    // algorithm used by the peer in the handshake
 	CurveID                    CurveID               // the curve used in ECDHE
+	QUICTransportParams        []byte                // the QUIC transport params received from the peer
 }
 
 // ClientAuthType declares the policy the server will follow for
@@ -460,6 +455,20 @@ type Config struct {
 	// returned in the ConnectionState.
 	RequestChannelID bool
 
+	// TokenBindingParams contains a list of TokenBindingKeyParameters
+	// (draft-ietf-tokbind-protocol-16) to attempt to negotiate. If
+	// nil, Token Binding will not be negotiated.
+	TokenBindingParams []byte
+
+	// TokenBindingVersion contains the serialized ProtocolVersion to
+	// use when negotiating Token Binding.
+	TokenBindingVersion uint16
+
+	// ExpectTokenBindingParams is checked by a server that the client
+	// sent ExpectTokenBindingParams as its list of Token Binding
+	// paramters.
+	ExpectTokenBindingParams []byte
+
 	// PreSharedKey, if not nil, is the pre-shared key to use with
 	// the PSK cipher suites.
 	PreSharedKey []byte
@@ -485,6 +494,10 @@ type Config struct {
 	// VerifySignatureAlgorithms, if not nil, overrides the default set of
 	// supported signature algorithms that are accepted.
 	VerifySignatureAlgorithms []signatureAlgorithm
+
+	// QUICTransportParams, if not empty, will be sent in the QUIC
+	// transport parameters extension.
+	QUICTransportParams []byte
 
 	// Bugs specifies optional misbehaviour to be used for testing other
 	// implementations.
@@ -517,6 +530,15 @@ const (
 	RSABadValueWrongLeadingByte
 	RSABadValueNoZero
 	NumRSABadValues
+)
+
+type RSAPSSSupport int
+
+const (
+	RSAPSSSupportAny RSAPSSSupport = iota
+	RSAPSSSupportNone
+	RSAPSSSupportOnlineSignatureOnly
+	RSAPSSSupportBoth
 )
 
 type ProtocolBugs struct {
@@ -770,8 +792,12 @@ type ProtocolBugs struct {
 	SendClientHelloSessionID []byte
 
 	// ExpectClientHelloSessionID, if true, causes the server to fail the
-	// connection if there is not a SessionID in the ClientHello.
+	// connection if there is not a session ID in the ClientHello.
 	ExpectClientHelloSessionID bool
+
+	// EchoSessionIDInFullHandshake, if true, causes the server to echo the
+	// ClientHello session ID, even in TLS 1.2 full handshakes.
+	EchoSessionIDInFullHandshake bool
 
 	// ExpectNoTLS12Session, if true, causes the server to fail the
 	// connection if either a session ID or TLS 1.2 ticket is offered.
@@ -1289,6 +1315,21 @@ type ProtocolBugs struct {
 	// it was accepted.
 	SendEarlyDataExtension bool
 
+	// ExpectEarlyKeyingMaterial, if non-zero, causes a TLS 1.3 server to
+	// read an application data record after the ClientHello before it sends
+	// a ServerHello. The record's contents have the specified length and
+	// match the corresponding early exporter value. This is used to test
+	// the client using the early exporter in the 0-RTT state.
+	ExpectEarlyKeyingMaterial int
+
+	// ExpectEarlyKeyingLabel is the label to use with
+	// ExpectEarlyKeyingMaterial.
+	ExpectEarlyKeyingLabel string
+
+	// ExpectEarlyKeyingContext is the context string to use with
+	// ExpectEarlyKeyingMaterial
+	ExpectEarlyKeyingContext string
+
 	// ExpectEarlyData causes a TLS 1.3 server to read application
 	// data after the ClientHello (assuming the server is able to
 	// derive the key under which the data is encrypted) before it
@@ -1510,6 +1551,35 @@ type ProtocolBugs struct {
 	// PadClientHello, if non-zero, pads the ClientHello to a multiple of
 	// that many bytes.
 	PadClientHello int
+
+	// SendDraftTLS13DowngradeRandom, if true, causes the server to send the
+	// draft TLS 1.3 anti-downgrade signal.
+	SendDraftTLS13DowngradeRandom bool
+
+	// ExpectDraftTLS13DowngradeRandom, if true, causes the client to
+	// require the server send the draft TLS 1.3 anti-downgrade signal.
+	ExpectDraftTLS13DowngradeRandom bool
+
+	// ExpectDummyPQPaddingLength, if not zero, causes the server to
+	// require that the client sent a dummy PQ padding extension of this
+	// length.
+	ExpectDummyPQPaddingLength int
+
+	// SendDummyPQPaddingLength causes a client to send a dummy PQ padding
+	// extension of the given length in the ClientHello.
+	SendDummyPQPaddingLength int
+
+	// SendCompressedCoordinates, if true, causes ECDH key shares over NIST
+	// curves to use compressed coordinates.
+	SendCompressedCoordinates bool
+
+	// ExpectRSAPSSSupport specifies the level of RSA-PSS support expected
+	// from the peer.
+	ExpectRSAPSSSupport RSAPSSSupport
+
+	// SetX25519HighBit, if true, causes X25519 key shares to set their
+	// high-order bit.
+	SetX25519HighBit bool
 }
 
 func (c *Config) serverInit() {
@@ -1622,7 +1692,7 @@ func wireToVersion(vers uint16, isDTLS bool) (uint16, bool) {
 		switch vers {
 		case VersionSSL30, VersionTLS10, VersionTLS11, VersionTLS12:
 			return vers, true
-		case tls13DraftVersion, tls13Draft22Version, tls13Draft21Version, tls13ExperimentVersion, tls13Experiment2Version, tls13Experiment3Version:
+		case tls13Draft23Version, tls13Draft28Version:
 			return VersionTLS13, true
 		}
 	}
@@ -1630,40 +1700,16 @@ func wireToVersion(vers uint16, isDTLS bool) (uint16, bool) {
 	return 0, false
 }
 
-func isDraft21(vers uint16) bool {
-	return vers == tls13Draft21Version || vers == tls13Draft22Version
-}
-
-func isDraft22(vers uint16) bool {
-	return vers == tls13Draft22Version
-}
-
-func isResumptionExperiment(vers uint16) bool {
-	return vers == tls13ExperimentVersion || vers == tls13Experiment2Version || vers == tls13Experiment3Version || vers == tls13Draft22Version
-}
-
-func isResumptionClientCCSExperiment(vers uint16) bool {
-	return vers == tls13ExperimentVersion || vers == tls13Experiment2Version || vers == tls13Draft22Version
-}
-
-func isResumptionRecordVersionExperiment(vers uint16) bool {
-	return vers == tls13Experiment2Version || vers == tls13Experiment3Version || vers == tls13Draft22Version
-}
-
-func isResumptionRecordVersionVariant(variant int) bool {
-	return variant == TLS13Experiment2 || variant == TLS13Experiment3 || variant == TLS13Draft22
+func isDraft28(vers uint16) bool {
+	return vers == tls13Draft28Version
 }
 
 // isSupportedVersion checks if the specified wire version is acceptable. If so,
 // it returns true and the corresponding protocol version. Otherwise, it returns
 // false.
 func (c *Config) isSupportedVersion(wireVers uint16, isDTLS bool) (uint16, bool) {
-	if (c.TLS13Variant != TLS13Experiment && wireVers == tls13ExperimentVersion) ||
-		(c.TLS13Variant != TLS13Experiment2 && wireVers == tls13Experiment2Version) ||
-		(c.TLS13Variant != TLS13Experiment3 && wireVers == tls13Experiment3Version) ||
-		(c.TLS13Variant != TLS13Draft22 && wireVers == tls13Draft22Version) ||
-		(c.TLS13Variant != TLS13Draft21 && wireVers == tls13Draft21Version) ||
-		(c.TLS13Variant != TLS13Default && wireVers == tls13DraftVersion) {
+	if (c.TLS13Variant != TLS13Draft23 && wireVers == tls13Draft23Version) ||
+		(c.TLS13Variant != TLS13Draft28 && wireVers == tls13Draft28Version) {
 		return 0, false
 	}
 
@@ -1960,6 +2006,8 @@ var (
 	// See draft-ietf-tls-tls13-16, section 6.3.1.2.
 	downgradeTLS13 = []byte{0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x01}
 	downgradeTLS12 = []byte{0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x00}
+
+	downgradeTLS13Draft = []uint8{0x95, 0xb9, 0x9f, 0x87, 0x22, 0xfe, 0x9b, 0x64}
 )
 
 func containsGREASE(values []uint16) bool {
@@ -1969,4 +2017,51 @@ func containsGREASE(values []uint16) bool {
 		}
 	}
 	return false
+}
+
+func checkRSAPSSSupport(support RSAPSSSupport, sigAlgs, sigAlgsCert []signatureAlgorithm) error {
+	if sigAlgsCert == nil {
+		sigAlgsCert = sigAlgs
+	} else if eqSignatureAlgorithms(sigAlgs, sigAlgsCert) {
+		// The peer should have only sent the list once.
+		return errors.New("tls: signature_algorithms and signature_algorithms_cert extensions were identical")
+	}
+
+	if support == RSAPSSSupportAny {
+		return nil
+	}
+
+	var foundPSS, foundPSSCert bool
+	for _, sigAlg := range sigAlgs {
+		if sigAlg == signatureRSAPSSWithSHA256 || sigAlg == signatureRSAPSSWithSHA384 || sigAlg == signatureRSAPSSWithSHA512 {
+			foundPSS = true
+			break
+		}
+	}
+	for _, sigAlg := range sigAlgsCert {
+		if sigAlg == signatureRSAPSSWithSHA256 || sigAlg == signatureRSAPSSWithSHA384 || sigAlg == signatureRSAPSSWithSHA512 {
+			foundPSSCert = true
+			break
+		}
+	}
+
+	expectPSS := support != RSAPSSSupportNone
+	if foundPSS != expectPSS {
+		if expectPSS {
+			return errors.New("tls: peer did not support PSS")
+		} else {
+			return errors.New("tls: peer unexpectedly supported PSS")
+		}
+	}
+
+	expectPSSCert := support == RSAPSSSupportBoth
+	if foundPSSCert != expectPSSCert {
+		if expectPSSCert {
+			return errors.New("tls: peer did not support PSS in certificates")
+		} else {
+			return errors.New("tls: peer unexpectedly supported PSS in certificates")
+		}
+	}
+
+	return nil
 }

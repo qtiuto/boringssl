@@ -67,6 +67,7 @@ crypto_sources := \
   src/crypto/chacha/chacha.c\
   src/crypto/cipher_extra/cipher_extra.c\
   src/crypto/cipher_extra/derive_key.c\
+  src/crypto/cipher_extra/e_aesccm.c\
   src/crypto/cipher_extra/e_aesctrhmac.c\
   src/crypto/cipher_extra/e_aesgcmsiv.c\
   src/crypto/cipher_extra/e_chacha20poly1305.c\
@@ -78,6 +79,7 @@ crypto_sources := \
   src/crypto/cipher_extra/tls_cbc.c\
   src/crypto/cmac/cmac.c\
   src/crypto/conf/conf.c\
+  src/crypto/cpu-aarch64-fuchsia.c\
   src/crypto/cpu-aarch64-linux.c\
   src/crypto/cpu-arm-linux.c\
   src/crypto/cpu-arm.c\
@@ -85,7 +87,6 @@ crypto_sources := \
   src/crypto/cpu-ppc64le.c\
   src/crypto/crypto.c\
   src/crypto/curve25519/spake25519.c\
-  src/crypto/curve25519/x25519-x86_64.c\
   src/crypto/dh/check.c\
   src/crypto/dh/dh.c\
   src/crypto/dh/dh_asn1.c\
@@ -295,5 +296,4 @@ linux_x86_64_sources := \
   linux-x86_64/crypto/fipsmodule/vpaes-x86_64.S\
   linux-x86_64/crypto/fipsmodule/x86_64-mont.S\
   linux-x86_64/crypto/fipsmodule/x86_64-mont5.S\
-  src/crypto/curve25519/asm/x25519-asm-x86_64.S\
 

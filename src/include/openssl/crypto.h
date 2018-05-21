@@ -58,6 +58,10 @@ OPENSSL_EXPORT int CRYPTO_has_asm(void);
 // which case it returns one.
 OPENSSL_EXPORT int FIPS_mode(void);
 
+// BORINGSSL_self_test triggers the FIPS KAT-based self tests. It returns one
+// on success and zero on error.
+OPENSSL_EXPORT int BORINGSSL_self_test(void);
+
 
 // Deprecated functions.
 
@@ -87,6 +91,9 @@ OPENSSL_EXPORT unsigned long OpenSSL_version_num(void);
 
 // CRYPTO_malloc_init returns one.
 OPENSSL_EXPORT int CRYPTO_malloc_init(void);
+
+// OPENSSL_malloc_init returns one.
+OPENSSL_EXPORT int OPENSSL_malloc_init(void);
 
 // ENGINE_load_builtin_engines does nothing.
 OPENSSL_EXPORT void ENGINE_load_builtin_engines(void);

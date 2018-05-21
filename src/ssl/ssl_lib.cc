@@ -4,21 +4,21 @@
  * This package is an SSL implementation written
  * by Eric Young (eay@cryptsoft.com).
  * The implementation was written so as to conform with Netscapes SSL.
- * 
+ *
  * This library is free for commercial and non-commercial use as long as
  * the following conditions are aheared to.  The following conditions
  * apply to all code found in this distribution, be it the RC4, RSA,
  * lhash, DES, etc., code; not just the SSL code.  The SSL documentation
  * included with this distribution is covered by the same copyright terms
  * except that the holder is Tim Hudson (tjh@cryptsoft.com).
- * 
+ *
  * Copyright remains Eric Young's, and as such any Copyright notices in
  * the code are not to be removed.
  * If this package is used in a product, Eric Young should be given attribution
  * as the author of the parts of the library used.
  * This can be in the form of a textual message at program startup or
  * in documentation (online or textual) provided with the package.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
@@ -33,10 +33,10 @@
  *     Eric Young (eay@cryptsoft.com)"
  *    The word 'cryptographic' can be left out if the rouines from the library
  *    being used are not cryptographic related :-).
- * 4. If you include any Windows specific code (or a derivative thereof) from 
+ * 4. If you include any Windows specific code (or a derivative thereof) from
  *    the apps directory (application code) you must include an acknowledgement:
  *    "This product includes software written by Tim Hudson (tjh@cryptsoft.com)"
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -48,7 +48,7 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- * 
+ *
  * The licence and distribution terms for any publically available version or
  * derivative of this code cannot be changed.  i.e. this code cannot simply be
  * copied and put under another distribution licence
@@ -62,7 +62,7 @@
  * are met:
  *
  * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer. 
+ *    notice, this list of conditions and the following disclaimer.
  *
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in
@@ -109,7 +109,7 @@
  */
 /* ====================================================================
  * Copyright 2002 Sun Microsystems, Inc. ALL RIGHTS RESERVED.
- * ECC cipher suite support in OpenSSL originally developed by 
+ * ECC cipher suite support in OpenSSL originally developed by
  * SUN MICROSYSTEMS, INC., and contributed to the OpenSSL project.
  */
 /* ====================================================================
@@ -270,16 +270,6 @@ ssl_open_record_t ssl_open_app_data(SSL *ssl, Span<uint8_t> *out,
     ssl_set_read_error(ssl);
   }
   return ret;
-}
-
-void ssl_cipher_preference_list_free(
-    struct ssl_cipher_preference_list_st *cipher_list) {
-  if (cipher_list == NULL) {
-    return;
-  }
-  sk_SSL_CIPHER_free(cipher_list->ciphers);
-  OPENSSL_free(cipher_list->in_group_flags);
-  OPENSSL_free(cipher_list);
 }
 
 void ssl_update_cache(SSL_HANDSHAKE *hs, int mode) {
@@ -465,6 +455,10 @@ void ssl_ctx_get_current_time(const SSL_CTX *ctx,
 #endif
 }
 
+void SSL_CTX_set_handoff_mode(SSL_CTX *ctx, bool on) {
+  ctx->handoff = on;
+}
+
 }  // namespace bssl
 
 using namespace bssl;
@@ -545,7 +539,7 @@ SSL_CTX *SSL_CTX_new(const SSL_METHOD *method) {
 
   ret->max_cert_list = SSL_MAX_CERT_LIST_DEFAULT;
   ret->verify_mode = SSL_VERIFY_NONE;
-  ret->cert = ssl_cert_new(method->x509_method);
+  ret->cert = New<CERT>(method->x509_method);
   if (ret->cert == NULL) {
     goto err;
   }
@@ -576,13 +570,12 @@ SSL_CTX *SSL_CTX_new(const SSL_METHOD *method) {
   // problems, the feature will be removed entirely.
   ret->mode = SSL_MODE_NO_AUTO_CHAIN;
 
+  ret->rsa_pss_rsae_certs_enabled = true;
+
   // Lock the SSL_CTX to the specified version, for compatibility with legacy
-  // uses of SSL_METHOD, but we do not set the minimum version for
-  // |SSLv3_method|.
+  // uses of SSL_METHOD.
   if (!SSL_CTX_set_max_proto_version(ret, method->version) ||
-      !SSL_CTX_set_min_proto_version(ret, method->version == SSL3_VERSION
-                                              ? 0  // default
-                                              : method->version)) {
+      !SSL_CTX_set_min_proto_version(ret, method->version)) {
     OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
     goto err2;
   }
@@ -619,8 +612,8 @@ void SSL_CTX_free(SSL_CTX *ctx) {
 
   CRYPTO_MUTEX_cleanup(&ctx->lock);
   lh_SSL_SESSION_free(ctx->sessions);
-  ssl_cipher_preference_list_free(ctx->cipher_list);
-  ssl_cert_free(ctx->cert);
+  Delete(ctx->cipher_list);
+  Delete(ctx->cert);
   sk_SSL_CUSTOM_EXTENSION_pop_free(ctx->client_custom_extensions,
                                    SSL_CUSTOM_EXTENSION_free);
   sk_SSL_CUSTOM_EXTENSION_pop_free(ctx->server_custom_extensions,
@@ -667,7 +660,7 @@ SSL *SSL_new(SSL_CTX *ctx) {
   ssl->mode = ctx->mode;
   ssl->max_cert_list = ctx->max_cert_list;
 
-  ssl->cert = ssl_cert_dup(ctx->cert);
+  ssl->cert = ssl_cert_dup(ctx->cert).release();
   if (ssl->cert == NULL) {
     goto err;
   }
@@ -736,6 +729,7 @@ SSL *SSL_new(SSL_CTX *ctx) {
 
   ssl->signed_cert_timestamps_enabled = ctx->signed_cert_timestamps_enabled;
   ssl->ocsp_stapling_enabled = ctx->ocsp_stapling_enabled;
+  ssl->handoff = ctx->handoff;
 
   return ssl;
 
@@ -761,16 +755,18 @@ void SSL_free(SSL *ssl) {
   BIO_free_all(ssl->wbio);
 
   // add extra stuff
-  ssl_cipher_preference_list_free(ssl->cipher_list);
+  Delete(ssl->cipher_list);
 
   SSL_SESSION_free(ssl->session);
 
-  ssl_cert_free(ssl->cert);
+  Delete(ssl->cert);
 
   OPENSSL_free(ssl->tlsext_hostname);
   SSL_CTX_free(ssl->session_ctx);
   OPENSSL_free(ssl->supported_group_list);
   OPENSSL_free(ssl->alpn_client_proto_list);
+  OPENSSL_free(ssl->token_binding_params);
+  OPENSSL_free(ssl->quic_transport_params);
   EVP_PKEY_free(ssl->tlsext_channel_id_private);
   OPENSSL_free(ssl->psk_identity_hint);
   sk_CRYPTO_BUFFER_pop_free(ssl->client_CA, CRYPTO_BUFFER_free);
@@ -1163,6 +1159,23 @@ int SSL_send_fatal_alert(SSL *ssl, uint8_t alert) {
   return ssl_send_alert(ssl, SSL3_AL_FATAL, alert);
 }
 
+int SSL_set_quic_transport_params(SSL *ssl, const uint8_t *params,
+                                  size_t params_len) {
+  ssl->quic_transport_params = (uint8_t *)BUF_memdup(params, params_len);
+  if (!ssl->quic_transport_params) {
+    return 0;
+  }
+  ssl->quic_transport_params_len = params_len;
+  return 1;
+}
+
+void SSL_get_peer_quic_transport_params(const SSL *ssl,
+                                        const uint8_t **out_params,
+                                        size_t *out_params_len) {
+  *out_params = ssl->s3->peer_quic_transport_params.data();
+  *out_params_len = ssl->s3->peer_quic_transport_params.size();
+}
+
 void SSL_CTX_set_early_data_enabled(SSL_CTX *ctx, int enabled) {
   ctx->cert->enable_early_data = !!enabled;
 }
@@ -1187,7 +1200,7 @@ int SSL_in_early_data(const SSL *ssl) {
 }
 
 int SSL_early_data_accepted(const SSL *ssl) {
-  return ssl->early_data_accepted;
+  return ssl->s3->early_data_accepted;
 }
 
 void SSL_reset_early_data_reject(SSL *ssl) {
@@ -1249,6 +1262,12 @@ int SSL_get_error(const SSL *ssl, int ret_code) {
 
     case SSL_CERTIFICATE_SELECTION_PENDING:
       return SSL_ERROR_PENDING_CERTIFICATE;
+
+    case SSL_HANDOFF:
+      return SSL_ERROR_HANDOFF;
+
+    case SSL_HANDBACK:
+      return SSL_ERROR_HANDBACK;
 
     case SSL_READING: {
       BIO *bio = SSL_get_rbio(ssl);
@@ -1577,12 +1596,12 @@ int SSL_pending(const SSL *ssl) {
 
 // Fix this so it checks all the valid key/cert options
 int SSL_CTX_check_private_key(const SSL_CTX *ctx) {
-  return ssl_cert_check_private_key(ctx->cert, ctx->cert->privatekey);
+  return ssl_cert_check_private_key(ctx->cert, ctx->cert->privatekey.get());
 }
 
 // Fix this function so that it takes an optional type parameter
 int SSL_check_private_key(const SSL *ssl) {
-  return ssl_cert_check_private_key(ssl->cert, ssl->cert->privatekey);
+  return ssl_cert_check_private_key(ssl->cert, ssl->cert->privatekey.get());
 }
 
 long SSL_get_default_timeout(const SSL *ssl) {
@@ -1791,11 +1810,11 @@ int SSL_set_tmp_dh(SSL *ssl, const DH *dh) {
 }
 
 STACK_OF(SSL_CIPHER) *SSL_CTX_get_ciphers(const SSL_CTX *ctx) {
-  return ctx->cipher_list->ciphers;
+  return ctx->cipher_list->ciphers.get();
 }
 
 int SSL_CTX_cipher_in_group(const SSL_CTX *ctx, size_t i) {
-  if (i >= sk_SSL_CIPHER_num(ctx->cipher_list->ciphers)) {
+  if (i >= sk_SSL_CIPHER_num(ctx->cipher_list->ciphers.get())) {
     return 0;
   }
   return ctx->cipher_list->in_group_flags[i];
@@ -1806,13 +1825,8 @@ STACK_OF(SSL_CIPHER) *SSL_get_ciphers(const SSL *ssl) {
     return NULL;
   }
 
-  const struct ssl_cipher_preference_list_st *prefs =
-      ssl_get_cipher_preferences(ssl);
-  if (prefs == NULL) {
-    return NULL;
-  }
-
-  return prefs->ciphers;
+  const SSLCipherPreferenceList *prefs = ssl_get_cipher_preferences(ssl);
+  return prefs == nullptr ? nullptr : prefs->ciphers.get();
 }
 
 const char *SSL_get_cipher_list(const SSL *ssl, int n) {
@@ -2122,6 +2136,28 @@ size_t SSL_get_tls_channel_id(SSL *ssl, uint8_t *out, size_t max_out) {
   return 64;
 }
 
+int SSL_set_token_binding_params(SSL *ssl, const uint8_t *params, size_t len) {
+  if (len > 256) {
+    OPENSSL_PUT_ERROR(SSL, ERR_R_OVERFLOW);
+    return 0;
+  }
+  OPENSSL_free(ssl->token_binding_params);
+  ssl->token_binding_params = (uint8_t *)BUF_memdup(params, len);
+  if (!ssl->token_binding_params) {
+    return 0;
+  }
+  ssl->token_binding_params_len = len;
+  return 1;
+}
+
+int SSL_is_token_binding_negotiated(const SSL *ssl) {
+  return ssl->s3->token_binding_negotiated;
+}
+
+uint8_t SSL_get_negotiated_token_binding_param(const SSL *ssl) {
+  return ssl->s3->negotiated_token_binding_param;
+}
+
 size_t SSL_get0_certificate_types(SSL *ssl, const uint8_t **out_types) {
   if (ssl->server || ssl->s3->hs == NULL) {
     *out_types = NULL;
@@ -2133,7 +2169,7 @@ size_t SSL_get0_certificate_types(SSL *ssl, const uint8_t **out_types) {
 
 EVP_PKEY *SSL_get_privatekey(const SSL *ssl) {
   if (ssl->cert != NULL) {
-    return ssl->cert->privatekey;
+    return ssl->cert->privatekey.get();
   }
 
   return NULL;
@@ -2141,7 +2177,7 @@ EVP_PKEY *SSL_get_privatekey(const SSL *ssl) {
 
 EVP_PKEY *SSL_CTX_get0_privatekey(const SSL_CTX *ctx) {
   if (ctx->cert != NULL) {
-    return ctx->cert->privatekey;
+    return ctx->cert->privatekey.get();
   }
 
   return NULL;
@@ -2222,8 +2258,8 @@ SSL_CTX *SSL_set_SSL_CTX(SSL *ssl, SSL_CTX *ctx) {
     ctx = ssl->session_ctx;
   }
 
-  ssl_cert_free(ssl->cert);
-  ssl->cert = ssl_cert_dup(ctx->cert);
+  Delete(ssl->cert);
+  ssl->cert = ssl_cert_dup(ctx->cert).release();
 
   SSL_CTX_up_ref(ctx);
   SSL_CTX_free(ssl->ctx);
@@ -2383,6 +2419,23 @@ void SSL_CTX_set_psk_server_callback(
     SSL_CTX *ctx, unsigned (*cb)(SSL *ssl, const char *identity,
                                  uint8_t *psk, unsigned max_psk_len)) {
   ctx->psk_server_callback = cb;
+}
+
+int SSL_set_dummy_pq_padding_size(SSL *ssl, size_t num_bytes) {
+  if (num_bytes > 0xffff) {
+    return 0;
+  }
+
+  ssl->dummy_pq_padding_len = num_bytes;
+  return 1;
+}
+
+int SSL_dummy_pq_padding_used(SSL *ssl) {
+  if (ssl->server) {
+    return 0;
+  }
+
+  return ssl->did_dummy_pq_padding;
 }
 
 void SSL_CTX_set_msg_callback(SSL_CTX *ctx,
@@ -2570,6 +2623,8 @@ int32_t SSL_get_ticket_age_skew(const SSL *ssl) {
 void SSL_CTX_set_false_start_allowed_without_alpn(SSL_CTX *ctx, int allowed) {
   ctx->false_start_allowed_without_alpn = !!allowed;
 }
+
+int SSL_is_draft_downgrade(const SSL *ssl) { return ssl->s3->draft_downgrade; }
 
 int SSL_clear(SSL *ssl) {
   // In OpenSSL, reusing a client |SSL| with |SSL_clear| causes the previously
