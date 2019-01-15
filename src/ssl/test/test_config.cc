@@ -104,7 +104,6 @@ const Flag<bool> kBoolFlags[] = {
   { "-renegotiate-ignore", &TestConfig::renegotiate_ignore },
   { "-forbid-renegotiation-after-handshake",
     &TestConfig::forbid_renegotiation_after_handshake },
-  { "-p384-only", &TestConfig::p384_only },
   { "-enable-all-curves", &TestConfig::enable_all_curves },
   { "-use-old-client-cert-callback",
     &TestConfig::use_old_client_cert_callback },
@@ -133,9 +132,9 @@ const Flag<bool> kBoolFlags[] = {
   { "-use-custom-verify-callback", &TestConfig::use_custom_verify_callback },
   { "-allow-false-start-without-alpn",
     &TestConfig::allow_false_start_without_alpn },
-  { "-expect-draft-downgrade", &TestConfig::expect_draft_downgrade },
+  { "-ignore-tls13-downgrade", &TestConfig::ignore_tls13_downgrade },
+  { "-expect-tls13-downgrade", &TestConfig::expect_tls13_downgrade },
   { "-handoff", &TestConfig::handoff },
-  { "-expect-dummy-pq-padding", &TestConfig::expect_dummy_pq_padding },
   { "-no-rsa-pss-rsae-certs", &TestConfig::no_rsa_pss_rsae_certs },
   { "-use-ocsp-callback", &TestConfig::use_ocsp_callback },
   { "-set-ocsp-in-callback", &TestConfig::set_ocsp_in_callback },
@@ -145,6 +144,10 @@ const Flag<bool> kBoolFlags[] = {
     &TestConfig::install_cert_compression_algs },
   { "-is-handshaker-supported", &TestConfig::is_handshaker_supported },
   { "-handshaker-resume", &TestConfig::handshaker_resume },
+  { "-reverify-on-resume", &TestConfig::reverify_on_resume },
+  { "-jdk11-workaround", &TestConfig::jdk11_workaround },
+  { "-server-preference", &TestConfig::server_preference },
+  { "-export-traffic-secrets", &TestConfig::export_traffic_secrets },
 };
 
 const Flag<std::string> kStringFlags[] = {
@@ -215,14 +218,13 @@ const Flag<int> kIntFlags[] = {
   { "-read-size", &TestConfig::read_size },
   { "-expect-ticket-age-skew", &TestConfig::expect_ticket_age_skew },
   { "-tls13-variant", &TestConfig::tls13_variant },
-  { "-dummy-pq-padding-len", &TestConfig::dummy_pq_padding_len },
 };
 
 const Flag<std::vector<int>> kIntVectorFlags[] = {
-  { "-signing-prefs", &TestConfig::signing_prefs },
-  { "-verify-prefs", &TestConfig::verify_prefs },
-  { "-expect-peer-verify-pref",
-    &TestConfig::expected_peer_verify_prefs },
+    {"-signing-prefs", &TestConfig::signing_prefs},
+    {"-verify-prefs", &TestConfig::verify_prefs},
+    {"-expect-peer-verify-pref", &TestConfig::expected_peer_verify_prefs},
+    {"-curves", &TestConfig::curves},
 };
 
 bool ParseFlag(char *flag, int argc, char **argv, int *i,
@@ -1272,6 +1274,10 @@ bssl::UniquePtr<SSL_CTX> TestConfig::SetupCtx(SSL_CTX *old_ctx) const {
     SSL_CTX_set_false_start_allowed_without_alpn(ssl_ctx.get(), 1);
   }
 
+  if (ignore_tls13_downgrade) {
+    SSL_CTX_set_ignore_tls13_downgrade(ssl_ctx.get(), 1);
+  }
+
   if (use_ocsp_callback) {
     SSL_CTX_set_tlsext_status_cb(ssl_ctx.get(), LegacyOCSPCallback);
   }
@@ -1288,7 +1294,6 @@ bssl::UniquePtr<SSL_CTX> TestConfig::SetupCtx(SSL_CTX *old_ctx) const {
                                              ticket_key.size())) {
     return nullptr;
   }
-
 
   if (install_cert_compression_algs &&
       (!SSL_CTX_add_cert_compression_alg(
@@ -1334,6 +1339,10 @@ bssl::UniquePtr<SSL_CTX> TestConfig::SetupCtx(SSL_CTX *old_ctx) const {
            }))) {
     fprintf(stderr, "SSL_CTX_add_cert_compression_alg failed.\n");
     abort();
+  }
+
+  if (server_preference) {
+    SSL_CTX_set_options(ssl_ctx.get(), SSL_OP_CIPHER_SERVER_PREFERENCE);
   }
 
   return ssl_ctx;
@@ -1491,6 +1500,9 @@ bssl::UniquePtr<SSL> TestConfig::NewSSL(
   if (partial_write) {
     SSL_set_mode(ssl.get(), SSL_MODE_ENABLE_PARTIAL_WRITE);
   }
+  if (reverify_on_resume) {
+    SSL_CTX_set_reverify_on_resume(ssl_ctx, 1);
+  }
   if (no_tls13) {
     SSL_set_options(ssl.get(), SSL_OP_NO_TLSv1_3);
   }
@@ -1581,16 +1593,43 @@ bssl::UniquePtr<SSL> TestConfig::NewSSL(
   if (!check_close_notify) {
     SSL_set_quiet_shutdown(ssl.get(), 1);
   }
-  if (p384_only) {
-    int nid = NID_secp384r1;
-    if (!SSL_set1_curves(ssl.get(), &nid, 1)) {
-      return nullptr;
+  if (!curves.empty()) {
+    std::vector<int> nids;
+    for (auto curve : curves) {
+      switch (curve) {
+        case SSL_CURVE_SECP224R1:
+          nids.push_back(NID_secp224r1);
+          break;
+
+        case SSL_CURVE_SECP256R1:
+          nids.push_back(NID_X9_62_prime256v1);
+          break;
+
+        case SSL_CURVE_SECP384R1:
+          nids.push_back(NID_secp384r1);
+          break;
+
+        case SSL_CURVE_SECP521R1:
+          nids.push_back(NID_secp521r1);
+          break;
+
+        case SSL_CURVE_X25519:
+          nids.push_back(NID_X25519);
+          break;
+
+        case SSL_CURVE_CECPQ2:
+          nids.push_back(NID_CECPQ2);
+          break;
+      }
+      if (!SSL_set1_curves(ssl.get(), &nids[0], nids.size())) {
+        return nullptr;
+      }
     }
   }
   if (enable_all_curves) {
     static const int kAllCurves[] = {
         NID_secp224r1, NID_X9_62_prime256v1, NID_secp384r1,
-        NID_secp521r1, NID_X25519,
+        NID_secp521r1, NID_X25519,           NID_CECPQ2,
     };
     if (!SSL_set1_curves(ssl.get(), kAllCurves,
                          OPENSSL_ARRAY_SIZE(kAllCurves))) {
@@ -1609,10 +1648,6 @@ bssl::UniquePtr<SSL> TestConfig::NewSSL(
   if (max_send_fragment > 0) {
     SSL_set_max_send_fragment(ssl.get(), max_send_fragment);
   }
-  if (dummy_pq_padding_len > 0 &&
-      !SSL_set_dummy_pq_padding_size(ssl.get(), dummy_pq_padding_len)) {
-    return nullptr;
-  }
   if (!quic_transport_params.empty()) {
     if (!SSL_set_quic_transport_params(
             ssl.get(),
@@ -1620,6 +1655,9 @@ bssl::UniquePtr<SSL> TestConfig::NewSSL(
             quic_transport_params.size())) {
       return nullptr;
     }
+  }
+  if (jdk11_workaround) {
+    SSL_set_jdk11_workaround(ssl.get(), 1);
   }
 
   if (session != NULL) {
@@ -1633,11 +1671,6 @@ bssl::UniquePtr<SSL> TestConfig::NewSSL(
       SSL_SESSION_up_ref(session);
       GetTestState(ssl.get())->pending_session.reset(session);
     }
-  }
-
-  if (SSL_get_current_cipher(ssl.get()) != nullptr) {
-    fprintf(stderr, "non-null cipher before handshake\n");
-    return nullptr;
   }
 
   return ssl;

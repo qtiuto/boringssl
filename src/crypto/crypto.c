@@ -19,19 +19,6 @@
 #include "internal.h"
 
 
-#if defined(OPENSSL_MSAN) && !defined(OPENSSL_NO_ASM)
-// MSan works by instrumenting memory accesses in the compiler. Accesses from
-// uninstrumented code, such as assembly, are invisible to it. MSan will
-// incorrectly report reads from assembly-initialized memory as uninitialized.
-// If building BoringSSL with MSan, exclude assembly files from the build and
-// define OPENSSL_NO_ASM.
-//
-// This is checked here rather than in a header because the consumer might not
-// define OPENSSL_NO_ASM. It is only necessary for BoringSSL source files to be
-// built with it.
-#error "BoringSSL must be built with assembly disabled to use MSan."
-#endif
-
 #if !defined(OPENSSL_NO_ASM) && !defined(OPENSSL_STATIC_ARMCAP) && \
     (defined(OPENSSL_X86) || defined(OPENSSL_X86_64) || \
      defined(OPENSSL_ARM) || defined(OPENSSL_AARCH64) || \
@@ -95,7 +82,8 @@ HIDDEN unsigned long OPENSSL_ppc64le_hwcap2 = 0;
 #if defined(OPENSSL_STATIC_ARMCAP)
 
 HIDDEN uint32_t OPENSSL_armcap_P =
-#if defined(OPENSSL_STATIC_ARMCAP_NEON) || defined(__ARM_NEON__)
+#if defined(OPENSSL_STATIC_ARMCAP_NEON) || \
+    (defined(__ARM_NEON__) || defined(__ARM_NEON))
     ARMV7_NEON |
 #endif
 #if defined(OPENSSL_STATIC_ARMCAP_AES) || defined(__ARM_FEATURE_CRYPTO)
@@ -114,6 +102,10 @@ HIDDEN uint32_t OPENSSL_armcap_P =
 
 #else
 HIDDEN uint32_t OPENSSL_armcap_P = 0;
+
+uint32_t *OPENSSL_get_armcap_pointer_for_test(void) {
+  return &OPENSSL_armcap_P;
+}
 #endif
 
 #endif
@@ -214,3 +206,5 @@ int OPENSSL_init_crypto(uint64_t opts, const OPENSSL_INIT_SETTINGS *settings) {
   CRYPTO_library_init();
   return 1;
 }
+
+void OPENSSL_cleanup(void) {}

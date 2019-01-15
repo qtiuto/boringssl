@@ -118,6 +118,7 @@ crypto_sources := \
   src/crypto/fipsmodule/bcm.c\
   src/crypto/fipsmodule/is_fips.c\
   src/crypto/hkdf/hkdf.c\
+  src/crypto/hrss/hrss.c\
   src/crypto/lhash/lhash.c\
   src/crypto/mem.c\
   src/crypto/obj/obj.c\
@@ -290,6 +291,7 @@ linux_x86_64_sources := \
   linux-x86_64/crypto/fipsmodule/ghash-x86_64.S\
   linux-x86_64/crypto/fipsmodule/md5-x86_64.S\
   linux-x86_64/crypto/fipsmodule/p256-x86_64-asm.S\
+  linux-x86_64/crypto/fipsmodule/p256_beeu-x86_64-asm.S\
   linux-x86_64/crypto/fipsmodule/rdrand-x86_64.S\
   linux-x86_64/crypto/fipsmodule/rsaz-avx2.S\
   linux-x86_64/crypto/fipsmodule/sha1-x86_64.S\
@@ -298,4 +300,5 @@ linux_x86_64_sources := \
   linux-x86_64/crypto/fipsmodule/vpaes-x86_64.S\
   linux-x86_64/crypto/fipsmodule/x86_64-mont.S\
   linux-x86_64/crypto/fipsmodule/x86_64-mont5.S\
+  src/crypto/hrss/asm/poly_rq_mul.S\
 

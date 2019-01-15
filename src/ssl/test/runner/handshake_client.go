@@ -19,7 +19,7 @@ import (
 	"net"
 	"time"
 
-	"./ed25519"
+	"boringssl.googlesource.com/boringssl/ssl/test/runner/ed25519"
 )
 
 type clientHandshakeState struct {
@@ -47,6 +47,32 @@ func mapClientHelloVersion(vers uint16, isDTLS bool) uint16 {
 	}
 
 	panic("Unknown ClientHello version.")
+}
+
+func fixClientHellos(hello *clientHelloMsg, in []byte) ([]byte, error) {
+	ret := append([]byte{}, in...)
+	newHello := new(clientHelloMsg)
+	if !newHello.unmarshal(ret) {
+		return nil, errors.New("tls: invalid ClientHello")
+	}
+
+	hello.random = newHello.random
+	hello.sessionId = newHello.sessionId
+
+	// Replace |ret|'s key shares with those of |hello|. For simplicity, we
+	// require their lengths match, which is satisfied by matching the
+	// DefaultCurves setting to the selection in the replacement
+	// ClientHello.
+	bb := newByteBuilder()
+	hello.marshalKeyShares(bb)
+	keyShares := bb.finish()
+	if len(keyShares) != len(newHello.keySharesRaw) {
+		return nil, errors.New("tls: ClientHello key share length is inconsistent with DefaultCurves setting")
+	}
+	// |newHello.keySharesRaw| aliases |ret|.
+	copy(newHello.keySharesRaw, keyShares)
+
+	return ret, nil
 }
 
 func (c *Conn) clientHandshake() error {
@@ -100,7 +126,6 @@ func (c *Conn) clientHandshake() error {
 		pskBinderFirst:          c.config.Bugs.PSKBinderFirst,
 		omitExtensions:          c.config.Bugs.OmitExtensions,
 		emptyExtensions:         c.config.Bugs.EmptyExtensions,
-		dummyPQPaddingLen:       c.config.Bugs.SendDummyPQPaddingLength,
 	}
 
 	if maxVersion >= VersionTLS13 {
@@ -406,7 +431,14 @@ NextCipherSuite:
 			}
 			generatePSKBinders(version, hello, pskCipherSuite, session.masterSecret, []byte{}, []byte{}, c.config)
 		}
-		helloBytes = hello.marshal()
+		if c.config.Bugs.SendClientHelloWithFixes != nil {
+			helloBytes, err = fixClientHellos(hello, c.config.Bugs.SendClientHelloWithFixes)
+			if err != nil {
+				return err
+			}
+		} else {
+			helloBytes = hello.marshal()
+		}
 
 		if c.config.Bugs.PartialClientFinishedWithClientHello {
 			// Include one byte of Finished. We can compute it
@@ -517,6 +549,9 @@ NextCipherSuite:
 	helloRetryRequest, haveHelloRetryRequest := msg.(*helloRetryRequestMsg)
 	var secondHelloBytes []byte
 	if haveHelloRetryRequest {
+		if c.config.Bugs.FailIfHelloRetryRequested {
+			return errors.New("tls: unexpected HelloRetryRequest")
+		}
 		// Explicitly read the ChangeCipherSpec now; it should
 		// be attached to the first flight, not the second flight.
 		if err := c.readTLS13ChangeCipherSpec(); err != nil {
@@ -603,22 +638,30 @@ NextCipherSuite:
 		return fmt.Errorf("tls: server sent non-matching version %x vs %x", serverWireVersion, serverHello.vers)
 	}
 
-	// Check for downgrade signals in the server random, per
-	// draft-ietf-tls-tls13-16, section 4.1.3.
-	if c.vers <= VersionTLS12 && c.config.maxVersion(c.isDTLS) >= VersionTLS13 {
-		if bytes.Equal(serverHello.random[len(serverHello.random)-8:], downgradeTLS13) {
-			c.sendAlert(alertProtocolVersion)
-			return errors.New("tls: downgrade from TLS 1.3 detected")
+	_, supportsTLS13 := c.config.isSupportedVersion(VersionTLS13, false)
+	// Check for downgrade signals in the server random, per RFC 8446, section 4.1.3.
+	gotDowngrade := serverHello.random[len(serverHello.random)-8:]
+	if (supportsTLS13 || c.config.Bugs.CheckTLS13DowngradeRandom) && !c.config.Bugs.IgnoreTLS13DowngradeRandom {
+		if c.vers <= VersionTLS12 && c.config.maxVersion(c.isDTLS) >= VersionTLS13 {
+			if bytes.Equal(gotDowngrade, downgradeTLS13) {
+				c.sendAlert(alertProtocolVersion)
+				return errors.New("tls: downgrade from TLS 1.3 detected")
+			}
+		}
+		if c.vers <= VersionTLS11 && c.config.maxVersion(c.isDTLS) >= VersionTLS12 {
+			if bytes.Equal(gotDowngrade, downgradeTLS12) {
+				c.sendAlert(alertProtocolVersion)
+				return errors.New("tls: downgrade from TLS 1.2 detected")
+			}
 		}
 	}
-	if c.vers <= VersionTLS11 && c.config.maxVersion(c.isDTLS) >= VersionTLS12 {
-		if bytes.Equal(serverHello.random[len(serverHello.random)-8:], downgradeTLS12) {
-			c.sendAlert(alertProtocolVersion)
-			return errors.New("tls: downgrade from TLS 1.2 detected")
+
+	if bytes.Equal(gotDowngrade, downgradeJDK11) != c.config.Bugs.ExpectJDK11DowngradeRandom {
+		c.sendAlert(alertProtocolVersion)
+		if c.config.Bugs.ExpectJDK11DowngradeRandom {
+			return errors.New("tls: server did not send a JDK 11 downgrade signal")
 		}
-	}
-	if c.config.Bugs.ExpectDraftTLS13DowngradeRandom && !bytes.Equal(serverHello.random[len(serverHello.random)-8:], downgradeTLS13Draft) {
-		return errors.New("tls: server did not send draft TLS 1.3 anti-downgrade signal")
+		return errors.New("tls: server sent an unexpected JDK 11 downgrade signal")
 	}
 
 	suite := mutualCipherSuite(hello.cipherSuites, serverHello.cipherSuite)
@@ -1557,10 +1600,6 @@ func (hs *clientHandshakeState) processServerExtensions(serverExtensions *server
 			return errors.New("tls: server sent QUIC transport params for TLS version less than 1.3")
 		}
 		c.quicTransportParams = serverExtensions.quicTransportParams
-	}
-
-	if l := c.config.Bugs.ExpectDummyPQPaddingLength; l != 0 && serverExtensions.dummyPQPaddingLen != l {
-		return fmt.Errorf("tls: expected %d-byte dummy PQ padding extension, but got %d bytes", l, serverExtensions.dummyPQPaddingLen)
 	}
 
 	return nil

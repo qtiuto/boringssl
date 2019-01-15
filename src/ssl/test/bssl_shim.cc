@@ -12,10 +12,6 @@
  * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE. */
 
-#if !defined(__STDC_FORMAT_MACROS)
-#define __STDC_FORMAT_MACROS
-#endif
-
 #include <openssl/base.h>
 
 #if !defined(OPENSSL_WINDOWS)
@@ -620,17 +616,9 @@ static bool CheckHandshakeProperties(SSL *ssl, bool is_resume,
     return false;
   }
 
-  if (config->expect_draft_downgrade != !!SSL_is_draft_downgrade(ssl)) {
-    fprintf(stderr, "Got %sdraft downgrade signal, but wanted the opposite.\n",
-            SSL_is_draft_downgrade(ssl) ? "" : "no ");
-    return false;
-  }
-
-  const bool did_dummy_pq_padding = !!SSL_dummy_pq_padding_used(ssl);
-  if (config->expect_dummy_pq_padding != did_dummy_pq_padding) {
-    fprintf(stderr,
-            "Dummy PQ padding %s observed, but expected the opposite.\n",
-            did_dummy_pq_padding ? "was" : "was not");
+  if (config->expect_tls13_downgrade != !!SSL_is_tls13_downgrade(ssl)) {
+    fprintf(stderr, "Got %s downgrade signal, but wanted the opposite.\n",
+            SSL_is_tls13_downgrade(ssl) ? "" : "no ");
     return false;
   }
 
@@ -660,7 +648,6 @@ static bool DoConnection(bssl::UniquePtr<SSL_SESSION> *out_session,
   } else {
     SSL_set_connect_state(ssl.get());
   }
-
 
   int sock = Connect(config->port);
   if (sock == -1) {
@@ -716,6 +703,7 @@ static bool DoConnection(bssl::UniquePtr<SSL_SESSION> *out_session,
 
     // Reset the connection and try again at 1-RTT.
     SSL_reset_early_data_reject(ssl.get());
+    GetTestState(ssl.get())->cert_verified = false;
 
     // After reseting, the socket should report it is no longer in an early data
     // state.
@@ -844,6 +832,23 @@ static bool DoExchange(bssl::UniquePtr<SSL_SESSION> *out_session,
       return false;
     }
     if (WriteAll(ssl, result.data(), result.size()) < 0) {
+      return false;
+    }
+  }
+
+  if (config->export_traffic_secrets) {
+    bssl::Span<const uint8_t> read_secret, write_secret;
+    if (!SSL_get_traffic_secrets(ssl, &read_secret, &write_secret)) {
+      fprintf(stderr, "failed to export traffic secrets\n");
+      return false;
+    }
+
+    assert(read_secret.size() <= 0xffff);
+    assert(write_secret.size() == read_secret.size());
+    const uint16_t secret_len = read_secret.size();
+    if (WriteAll(ssl, &secret_len, sizeof(secret_len)) < 0 ||
+        WriteAll(ssl, read_secret.data(), read_secret.size()) < 0 ||
+        WriteAll(ssl, write_secret.data(), write_secret.size()) < 0) {
       return false;
     }
   }

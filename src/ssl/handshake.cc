@@ -122,7 +122,7 @@
 #include "internal.h"
 
 
-namespace bssl {
+BSSL_NAMESPACE_BEGIN
 
 SSL_HANDSHAKE::SSL_HANDSHAKE(SSL *ssl_arg)
     : ssl(ssl_arg),
@@ -147,7 +147,8 @@ SSL_HANDSHAKE::SSL_HANDSHAKE(SSL *ssl_arg)
       pending_private_key_op(false),
       grease_seeded(false),
       handback(false),
-      cert_compression_negotiated(false) {
+      cert_compression_negotiated(false),
+      apply_jdk11_workaround(false) {
   assert(ssl);
 }
 
@@ -157,8 +158,7 @@ SSL_HANDSHAKE::~SSL_HANDSHAKE() {
 
 UniquePtr<SSL_HANDSHAKE> ssl_handshake_new(SSL *ssl) {
   UniquePtr<SSL_HANDSHAKE> hs = MakeUnique<SSL_HANDSHAKE>(ssl);
-  if (!hs ||
-      !hs->transcript.Init()) {
+  if (!hs || !hs->transcript.Init()) {
     return nullptr;
   }
   hs->config = ssl->config.get();
@@ -373,6 +373,32 @@ enum ssl_verify_result_t ssl_verify_peer_cert(SSL_HANDSHAKE *hs) {
   return ret;
 }
 
+// Verifies a stored certificate when resuming a session. A few things are
+// different from verify_peer_cert:
+// 1. We can't be renegotiating if we're resuming a session.
+// 2. The session is immutable, so we don't support verify_mode ==
+// SSL_VERIFY_NONE
+// 3. We don't call the OCSP callback.
+// 4. We only support custom verify callbacks.
+enum ssl_verify_result_t ssl_reverify_peer_cert(SSL_HANDSHAKE *hs) {
+  SSL *const ssl = hs->ssl;
+  assert(ssl->s3->established_session == nullptr);
+  assert(hs->config->verify_mode != SSL_VERIFY_NONE);
+
+  uint8_t alert = SSL_AD_CERTIFICATE_UNKNOWN;
+  enum ssl_verify_result_t ret = ssl_verify_invalid;
+  if (hs->config->custom_verify_callback != nullptr) {
+    ret = hs->config->custom_verify_callback(ssl, &alert);
+  }
+
+  if (ret == ssl_verify_invalid) {
+    OPENSSL_PUT_ERROR(SSL, SSL_R_CERTIFICATE_VERIFY_FAILED);
+    ssl_send_alert(ssl, SSL3_AL_FATAL, alert);
+  }
+
+  return ret;
+}
+
 uint16_t ssl_get_grease_value(SSL_HANDSHAKE *hs,
                               enum ssl_grease_index_t index) {
   // Draw entropy for all GREASE values at once. This avoids calling
@@ -452,8 +478,7 @@ bool ssl_send_finished(SSL_HANDSHAKE *hs) {
   }
 
   // Log the master secret, if logging is enabled.
-  if (!ssl_log_secret(ssl, "CLIENT_RANDOM",
-                      session->master_key,
+  if (!ssl_log_secret(ssl, "CLIENT_RANDOM", session->master_key,
                       session->master_key_length)) {
     return 0;
   }
@@ -519,6 +544,16 @@ int ssl_run_handshake(SSL_HANDSHAKE *hs, bool *out_early_return) {
       case ssl_hs_read_server_hello:
       case ssl_hs_read_message:
       case ssl_hs_read_change_cipher_spec: {
+        if (ssl->ctx->quic_method) {
+          hs->wait = ssl_hs_ok;
+          // The change cipher spec is omitted in QUIC.
+          if (hs->wait != ssl_hs_read_change_cipher_spec) {
+            ssl->s3->rwstate = SSL_READING;
+            return -1;
+          }
+          break;
+        }
+
         uint8_t alert = SSL_AD_DECODE_ERROR;
         size_t consumed = 0;
         ssl_open_record_t ret;
@@ -643,4 +678,4 @@ int ssl_run_handshake(SSL_HANDSHAKE *hs, bool *out_early_return) {
   }
 }
 
-}  // namespace bssl
+BSSL_NAMESPACE_END

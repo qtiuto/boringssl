@@ -162,7 +162,7 @@
 #include "internal.h"
 
 
-namespace bssl {
+BSSL_NAMESPACE_BEGIN
 
 SSL3_STATE::SSL3_STATE()
     : skip_early_data(false),
@@ -177,7 +177,7 @@ SSL3_STATE::SSL3_STATE()
       key_update_pending(false),
       wpend_pending(false),
       early_data_accepted(false),
-      draft_downgrade(false),
+      tls13_downgrade(false),
       token_binding_negotiated(false) {}
 
 SSL3_STATE::~SSL3_STATE() {}
@@ -215,4 +215,4 @@ void ssl3_free(SSL *ssl) {
   ssl->s3 = NULL;
 }
 
-}  // namespace bssl
+BSSL_NAMESPACE_END

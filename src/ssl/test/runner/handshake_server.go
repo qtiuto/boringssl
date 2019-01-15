@@ -18,7 +18,7 @@ import (
 	"math/big"
 	"time"
 
-	"./ed25519"
+	"boringssl.googlesource.com/boringssl/ssl/test/runner/ed25519"
 )
 
 // serverHandshakeState contains details of a server handshake in progress.
@@ -208,6 +208,26 @@ func (hs *serverHandshakeState) readClientHello() error {
 		}
 	}
 
+	if config.Bugs.FailIfCECPQ2Offered {
+		for _, offeredCurve := range hs.clientHello.supportedCurves {
+			if offeredCurve == CurveCECPQ2 {
+				return errors.New("tls: CECPQ2 was offered")
+			}
+		}
+	}
+
+	if expected := config.Bugs.ExpectedKeyShares; expected != nil {
+		if len(expected) != len(hs.clientHello.keyShares) {
+			return fmt.Errorf("tls: expected %d key shares, but found %d", len(expected), len(hs.clientHello.keyShares))
+		}
+
+		for i, group := range expected {
+			if found := hs.clientHello.keyShares[i].group; found != group {
+				return fmt.Errorf("tls: key share #%d is for group %d, not %d", i, found, group)
+			}
+		}
+	}
+
 	c.clientVersion = hs.clientHello.vers
 
 	// Use the versions extension if supplied, otherwise use the legacy ClientHello version.
@@ -335,10 +355,6 @@ func (hs *serverHandshakeState) readClientHello() error {
 		if !greaseFound && config.Bugs.ExpectGREASE {
 			return errors.New("tls: no GREASE curve value found")
 		}
-	}
-
-	if expected := hs.clientHello.dummyPQPaddingLen; expected != config.Bugs.ExpectDummyPQPaddingLength {
-		return fmt.Errorf("tls: expected dummy PQ padding extension of length %d, but got one of length %d", expected, config.Bugs.ExpectDummyPQPaddingLength)
 	}
 
 	if err := checkRSAPSSSupport(config.Bugs.ExpectRSAPSSSupport, hs.clientHello.signatureAlgorithms, hs.clientHello.signatureAlgorithmsCert); err != nil {
@@ -1174,16 +1190,20 @@ func (hs *serverHandshakeState) processClientHello() (isResume bool, err error) 
 		c.sendAlert(alertInternalError)
 		return false, err
 	}
-	// Signal downgrades in the server random, per draft-ietf-tls-tls13-16,
-	// section 4.1.3.
-	if c.vers <= VersionTLS12 && config.maxVersion(c.isDTLS) >= VersionTLS13 {
-		copy(hs.hello.random[len(hs.hello.random)-8:], downgradeTLS13)
+
+	_, supportsTLS13 := c.config.isSupportedVersion(VersionTLS13, false)
+
+	// Signal downgrades in the server random, per RFC 8446, section 4.1.3.
+	if supportsTLS13 || config.Bugs.SendTLS13DowngradeRandom {
+		if c.vers <= VersionTLS12 && config.maxVersion(c.isDTLS) >= VersionTLS13 {
+			copy(hs.hello.random[len(hs.hello.random)-8:], downgradeTLS13)
+		}
+		if c.vers <= VersionTLS11 && config.maxVersion(c.isDTLS) == VersionTLS12 {
+			copy(hs.hello.random[len(hs.hello.random)-8:], downgradeTLS12)
+		}
 	}
-	if c.vers <= VersionTLS11 && config.maxVersion(c.isDTLS) == VersionTLS12 {
-		copy(hs.hello.random[len(hs.hello.random)-8:], downgradeTLS12)
-	}
-	if config.Bugs.SendDraftTLS13DowngradeRandom {
-		copy(hs.hello.random[len(hs.hello.random)-8:], downgradeTLS13Draft)
+	if config.Bugs.SendJDK11DowngradeRandom {
+		copy(hs.hello.random[len(hs.hello.random)-8:], downgradeJDK11)
 	}
 
 	if len(hs.clientHello.sessionId) == 0 && c.config.Bugs.ExpectClientHelloSessionID {
@@ -1212,6 +1232,11 @@ func (hs *serverHandshakeState) processClientHello() (isResume bool, err error) 
 	preferredCurves := config.curvePreferences()
 Curves:
 	for _, curve := range hs.clientHello.supportedCurves {
+		if curve == CurveCECPQ2 && c.vers < VersionTLS13 {
+			// CECPQ2 is TLS 1.3-only.
+			continue
+		}
+
 		for _, supported := range preferredCurves {
 			if supported == curve {
 				supportedCurve = true
@@ -1430,10 +1455,6 @@ func (hs *serverHandshakeState) processClientExtensions(serverExtensions *server
 		return errors.New("tls: no GREASE extension found")
 	}
 
-	if l := hs.clientHello.dummyPQPaddingLen; l != 0 {
-		serverExtensions.dummyPQPaddingLen = l
-	}
-
 	serverExtensions.serverNameAck = c.config.Bugs.SendServerNameAck
 
 	return nil
@@ -1625,7 +1646,7 @@ func (hs *serverHandshakeState) doFullHandshake() error {
 	}
 
 	keyAgreement := hs.suite.ka(c.vers)
-	skx, err := keyAgreement.generateServerKeyExchange(config, hs.cert, hs.clientHello, hs.hello)
+	skx, err := keyAgreement.generateServerKeyExchange(config, hs.cert, hs.clientHello, hs.hello, c.vers)
 	if err != nil {
 		c.sendAlert(alertHandshakeFailure)
 		return err
